@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "mss>=9.0",
     "numpy>=1.26",
+    "opencv-python-headless>=4.8",
 ]
 
 [project.optional-dependencies]
