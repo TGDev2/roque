@@ -223,9 +223,9 @@ class TestPartiallyOccluded:
             1920, 1080, self.BOARD_X, self.BOARD_Y, self.BOARD_SIZE,
             CHESSCOM_LIGHT, CHESSCOM_DARK,
         )
-        # Overlay a rectangle covering ~15% of the board (top-right corner)
-        overlay_w = int(self.BOARD_SIZE * 0.15)
-        overlay_h = int(self.BOARD_SIZE * 0.15)
+        # Overlay a rectangle covering exactly ~15% of the board area.
+        overlay_w = int(self.BOARD_SIZE * 0.20)
+        overlay_h = int(self.BOARD_SIZE * 0.75)
         ox = self.BOARD_X + self.BOARD_SIZE - overlay_w
         oy = self.BOARD_Y
         cv2.rectangle(

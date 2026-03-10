@@ -5,15 +5,34 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 import mss
-import mss.tools
 import numpy as np
+from mss.exception import ScreenShotError
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+
+
+MIN_CAPTURE_INTERVAL_MS = 50
+
+
+class ScreenCaptureError(RuntimeError):
+    """Base class for screen capture runtime failures."""
+
+
+class CapturePermissionError(ScreenCaptureError):
+    """Raised when OS-level screen recording permissions are missing."""
+
+
+class DisplayUnavailableError(ScreenCaptureError):
+    """Raised when no graphical display is available."""
+
+
+class MonitorSelectionError(ScreenCaptureError):
+    """Raised when monitor selection is invalid or missing."""
 
 
 @dataclass
@@ -25,6 +44,17 @@ class CaptureConfig:
 
     monitor_index: int | None = None
     """Monitor index to capture (1-based). None means not yet selected."""
+
+    def __post_init__(self) -> None:
+        if self.interval_ms < MIN_CAPTURE_INTERVAL_MS:
+            raise ValueError(
+                f"interval_ms must be >= {MIN_CAPTURE_INTERVAL_MS}, "
+                f"got {self.interval_ms}."
+            )
+        if self.monitor_index is not None and self.monitor_index < 1:
+            raise ValueError(
+                f"monitor_index must be >= 1 or None, got {self.monitor_index}."
+            )
 
 
 @dataclass
@@ -65,9 +95,44 @@ class ScreenCapture:
 
     @property
     def frame(self) -> NDArray[np.uint8] | None:
-        """Return the latest captured frame (or None if no capture yet)."""
+        """Return a copy of the latest frame (or None if no capture yet)."""
+        return self.get_frame(copy=True)
+
+    def get_frame(self, *, copy: bool = True) -> NDArray[np.uint8] | None:
+        """Return the latest captured frame.
+
+        Args:
+            copy: When True (default), returns a defensive copy to protect the
+                internal buffer from external mutation.
+        """
         with self._lock:
+            if self._frame is None:
+                return None
+            if copy:
+                return self._frame.copy()
             return self._frame
+
+    @staticmethod
+    def _translate_screenshot_error(exc: ScreenShotError) -> ScreenCaptureError:
+        message = str(exc).lower()
+        if "permission" in message or "not authorized" in message or "denied" in message:
+            return CapturePermissionError(
+                "Screen capture permission denied by the OS."
+            )
+        if "display" in message or "unable to open" in message:
+            return DisplayUnavailableError(
+                "No graphical display is available for screen capture."
+            )
+        return ScreenCaptureError(f"Screen capture failed: {exc}")
+
+    @staticmethod
+    def check_capture_access() -> None:
+        """Check that the process can enumerate monitors and capture the screen."""
+        try:
+            with mss.mss() as sct:
+                _ = sct.monitors
+        except ScreenShotError as exc:
+            raise ScreenCapture._translate_screenshot_error(exc) from exc
 
     @staticmethod
     def list_monitors() -> list[MonitorInfo]:
@@ -76,33 +141,47 @@ class ScreenCapture:
         Returns a list of MonitorInfo (1-based index, matching mss convention).
         Index 0 in mss is the virtual "all monitors" screen; we skip it.
         """
-        with mss.mss() as sct:
-            monitors: list[MonitorInfo] = []
-            for i, mon in enumerate(sct.monitors):
-                if i == 0:
-                    continue  # skip virtual combined monitor
-                monitors.append(
-                    MonitorInfo(
-                        index=i,
-                        left=mon["left"],
-                        top=mon["top"],
-                        width=mon["width"],
-                        height=mon["height"],
+        try:
+            with mss.mss() as sct:
+                monitors: list[MonitorInfo] = []
+                for i, mon in enumerate(sct.monitors):
+                    if i == 0:
+                        continue  # skip virtual combined monitor
+                    monitors.append(
+                        MonitorInfo(
+                            index=i,
+                            left=mon["left"],
+                            top=mon["top"],
+                            width=mon["width"],
+                            height=mon["height"],
+                        )
                     )
-                )
-            return monitors
+                return monitors
+        except ScreenShotError as exc:
+            raise ScreenCapture._translate_screenshot_error(exc) from exc
 
     def select_monitor(self, index: int) -> None:
         """Select which monitor to capture (1-based index)."""
         monitors = self.list_monitors()
+        if not monitors:
+            raise MonitorSelectionError("No physical monitor detected.")
+
         valid_indices = {m.index for m in monitors}
         if index not in valid_indices:
-            raise ValueError(
+            raise MonitorSelectionError(
                 f"Invalid monitor index {index}. "
                 f"Available: {sorted(valid_indices)}"
             )
         self._config.monitor_index = index
         logger.info("Monitor %d selected for capture.", index)
+
+    def _require_monitor_selected(self) -> int:
+        if self._config.monitor_index is None:
+            raise MonitorSelectionError(
+                "No monitor selected. Call select_monitor() first "
+                "or use list_monitors() to discover available screens."
+            )
+        return self._config.monitor_index
 
     def capture_once(self) -> NDArray[np.uint8]:
         """Capture a single frame from the selected monitor.
@@ -110,27 +189,31 @@ class ScreenCapture:
         Returns the captured image as a numpy array (H, W, 4) in BGRA format.
 
         Raises:
-            RuntimeError: If no monitor has been selected.
+            MonitorSelectionError: If no monitor has been selected.
         """
-        if self._config.monitor_index is None:
-            raise RuntimeError(
-                "No monitor selected. Call select_monitor() first "
-                "or use list_monitors() to discover available screens."
-            )
+        monitor_index = self._require_monitor_selected()
 
-        with mss.mss() as sct:
-            monitor = sct.monitors[self._config.monitor_index]
-            raw = sct.grab(monitor)
-            frame = np.asarray(raw, dtype=np.uint8).copy()
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[monitor_index]
+                raw = sct.grab(monitor)
+                frame = np.asarray(raw, dtype=np.uint8).copy()
+        except ScreenShotError as exc:
+            raise self._translate_screenshot_error(exc) from exc
+        except IndexError as exc:
+            raise MonitorSelectionError(
+                f"Monitor index {monitor_index} no longer exists."
+            ) from exc
 
         with self._lock:
+            frame.setflags(write=False)
             self._frame = frame
 
         logger.debug(
             "Frame captured: %dx%d from monitor %d.",
             frame.shape[1],
             frame.shape[0],
-            self._config.monitor_index,
+            monitor_index,
         )
         return frame
 
@@ -140,10 +223,8 @@ class ScreenCapture:
 
     def start(self) -> None:
         """Start periodic capture in a background thread."""
-        if self._config.monitor_index is None:
-            raise RuntimeError(
-                "No monitor selected. Call select_monitor() before start()."
-            )
+        self._require_monitor_selected()
+        self.check_capture_access()
         if self._running:
             logger.warning("Capture already running.")
             return
@@ -175,24 +256,47 @@ class ScreenCapture:
         """Internal loop running in background thread."""
         interval_s = self._config.interval_ms / 1000.0
 
-        with mss.mss() as sct:
-            while self._running:
-                start = time.perf_counter()
-                try:
-                    monitor = sct.monitors[self._config.monitor_index]  # type: ignore[index]
-                    raw = sct.grab(monitor)
-                    frame = np.asarray(raw, dtype=np.uint8).copy()
+        monitor_index = self._require_monitor_selected()
 
-                    with self._lock:
-                        self._frame = frame
+        try:
+            with mss.mss() as sct:
+                while self._running:
+                    start = time.perf_counter()
+                    try:
+                        monitor = sct.monitors[monitor_index]
+                        raw = sct.grab(monitor)
+                        frame = np.asarray(raw, dtype=np.uint8).copy()
+                        frame.setflags(write=False)
 
-                    if self._on_frame is not None:
-                        self._on_frame(frame)
+                        with self._lock:
+                            self._frame = frame
 
-                except Exception:
-                    logger.exception("Error during screen capture.")
+                        if self._on_frame is not None:
+                            try:
+                                self._on_frame(frame)
+                            except Exception:
+                                logger.exception("Frame callback raised an error.")
 
-                elapsed = time.perf_counter() - start
-                sleep_time = max(0.0, interval_s - elapsed)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                    except ScreenShotError as exc:
+                        translated = self._translate_screenshot_error(exc)
+                        logger.error("%s", translated)
+                        self._running = False
+                        break
+                    except IndexError:
+                        logger.error(
+                            "Monitor index %d no longer exists. Stopping capture.",
+                            monitor_index,
+                        )
+                        self._running = False
+                        break
+                    except Exception:
+                        logger.exception("Error during screen capture.")
+
+                    elapsed = time.perf_counter() - start
+                    sleep_time = max(0.0, interval_s - elapsed)
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+        except ScreenShotError as exc:
+            translated = self._translate_screenshot_error(exc)
+            logger.error("%s", translated)
+            self._running = False

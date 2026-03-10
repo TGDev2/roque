@@ -1,0 +1,74 @@
+[
+  {
+    "image": "images/chesscom_001.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_002.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_003.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_004.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_005.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_006.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_007.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  },
+  {
+    "image": "images/chesscom_008.png",
+    "board": {
+      "x": 326,
+      "y": 64,
+      "width": 944,
+      "height": 944
+    }
+  }
+]

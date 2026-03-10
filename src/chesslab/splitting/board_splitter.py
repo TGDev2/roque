@@ -73,14 +73,23 @@ class BoardSplitter:
             SplitResult with 64 SquareImage entries keyed by algebraic name.
         """
         start = time.perf_counter()
+        self._validate_inputs(frame, board)
 
         roi = frame[
             board.y : board.y + board.height,
             board.x : board.x + board.width,
         ]
 
-        cell_h = board.height // 8
-        cell_w = board.width // 8
+        cell_h, rem_h = divmod(board.height, 8)
+        cell_w, rem_w = divmod(board.width, 8)
+        if rem_h or rem_w:
+            logger.debug(
+                "Board dimensions (%dx%d) not divisible by 8; trimming %d px bottom and %d px right.",
+                board.width,
+                board.height,
+                rem_h,
+                rem_w,
+            )
 
         squares: dict[str, SquareImage] = {}
 
@@ -106,6 +115,29 @@ class BoardSplitter:
                 )
 
         elapsed = (time.perf_counter() - start) * 1000
-        logger.info("Board split into 64 squares (%.1f ms).", elapsed)
+        logger.debug("Board split into 64 squares (%.1f ms).", elapsed)
 
         return SplitResult(squares=squares, elapsed_ms=elapsed)
+
+    @staticmethod
+    def _validate_inputs(frame: NDArray[np.uint8], board: BoardRegion) -> None:
+        if frame.ndim != 3 or frame.shape[2] not in (3, 4):
+            raise ValueError(
+                f"Expected frame shape (H, W, 3|4), got {frame.shape}."
+            )
+
+        frame_h, frame_w = frame.shape[:2]
+        if board.width < 8 or board.height < 8:
+            raise ValueError(
+                f"Board region too small for 8x8 split: {board.width}x{board.height}."
+            )
+        if board.x < 0 or board.y < 0:
+            raise ValueError(
+                f"Board coordinates must be non-negative, got ({board.x}, {board.y})."
+            )
+        if board.x + board.width > frame_w or board.y + board.height > frame_h:
+            raise ValueError(
+                "Board region is out of frame bounds: "
+                f"board=({board.x}, {board.y}, {board.width}, {board.height}), "
+                f"frame=({frame_w}x{frame_h})."
+            )

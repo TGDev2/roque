@@ -8,16 +8,20 @@ Covers acceptance criteria:
 
 from __future__ import annotations
 
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from mss.exception import ScreenShotError
 
 from chesslab.capture.screen_capture import (
     CaptureConfig,
+    CapturePermissionError,
+    DisplayUnavailableError,
+    MIN_CAPTURE_INTERVAL_MS,
     MonitorInfo,
+    MonitorSelectionError,
     ScreenCapture,
 )
 
@@ -85,6 +89,22 @@ class TestListMonitors:
         assert m2.index == 2
         assert m2.left == 1920
 
+    def test_permission_error_is_translated(self) -> None:
+        with patch(
+            "chesslab.capture.screen_capture.mss.mss",
+            side_effect=ScreenShotError("Permission denied"),
+        ):
+            with pytest.raises(CapturePermissionError):
+                ScreenCapture.list_monitors()
+
+    def test_display_unavailable_is_translated(self) -> None:
+        with patch(
+            "chesslab.capture.screen_capture.mss.mss",
+            side_effect=ScreenShotError("Unable to open display"),
+        ):
+            with pytest.raises(DisplayUnavailableError):
+                ScreenCapture.list_monitors()
+
 
 class TestSelectMonitor:
     def test_select_valid_monitor(self, mock_mss: MagicMock) -> None:
@@ -99,7 +119,7 @@ class TestSelectMonitor:
 
     def test_select_invalid_monitor_raises(self, mock_mss: MagicMock) -> None:
         cap = ScreenCapture()
-        with pytest.raises(ValueError, match="Invalid monitor index 5"):
+        with pytest.raises(MonitorSelectionError, match="Invalid monitor index 5"):
             cap.select_monitor(5)
 
 
@@ -128,8 +148,17 @@ class TestCaptureOnce:
 
     def test_capture_without_monitor_raises(self, mock_mss: MagicMock) -> None:
         cap = ScreenCapture()
-        with pytest.raises(RuntimeError, match="No monitor selected"):
+        with pytest.raises(MonitorSelectionError, match="No monitor selected"):
             cap.capture_once()
+
+    def test_frame_property_returns_defensive_copy(self, mock_mss: MagicMock) -> None:
+        cap = ScreenCapture(CaptureConfig(monitor_index=1))
+        cap.capture_once()
+        first = cap.frame
+        second = cap.frame
+        assert first is not None and second is not None
+        first[0, 0, 0] = 255
+        assert second[0, 0, 0] == 0
 
     def test_capture_completes_under_200ms(self, mock_mss: MagicMock) -> None:
         """AC: capture in < 200 ms."""
@@ -169,7 +198,7 @@ class TestPeriodicCapture:
 
     def test_start_without_monitor_raises(self, mock_mss: MagicMock) -> None:
         cap = ScreenCapture()
-        with pytest.raises(RuntimeError, match="No monitor selected"):
+        with pytest.raises(MonitorSelectionError, match="No monitor selected"):
             cap.start()
 
     def test_double_start_is_safe(self, mock_mss: MagicMock) -> None:
@@ -229,6 +258,16 @@ class TestPeriodicCapture:
         assert call_count >= 2
         assert cap.frame is not None
 
+    def test_callback_receives_readonly_frame(self, mock_mss: MagicMock) -> None:
+        flags: list[bool] = []
+        cap = ScreenCapture(CaptureConfig(monitor_index=1, interval_ms=100))
+        cap.on_frame(lambda frame: flags.append(frame.flags.writeable))
+        cap.start()
+        time.sleep(0.2)
+        cap.stop()
+        assert flags
+        assert all(flag is False for flag in flags)
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -247,3 +286,11 @@ class TestCaptureConfig:
     def test_default_monitor_is_none(self) -> None:
         cfg = CaptureConfig()
         assert cfg.monitor_index is None
+
+    def test_interval_too_low_raises(self) -> None:
+        with pytest.raises(ValueError, match="interval_ms must be >="):
+            CaptureConfig(interval_ms=MIN_CAPTURE_INTERVAL_MS - 1)
+
+    def test_monitor_index_below_1_raises(self) -> None:
+        with pytest.raises(ValueError, match="monitor_index must be >= 1"):
+            CaptureConfig(monitor_index=0)

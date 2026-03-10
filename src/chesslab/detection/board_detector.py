@@ -101,14 +101,14 @@ class BoardDetector:
         self._last_result = result
 
         if board:
-            logger.info(
+            logger.debug(
                 "Board detected at (%d, %d) size %dx%d "
                 "(confidence=%.2f, %.1f ms).",
                 board.x, board.y, board.width, board.height,
                 board.confidence, elapsed,
             )
         else:
-            logger.info("No chessboard detected (%.1f ms).", elapsed)
+            logger.debug("No chessboard detected (%.1f ms).", elapsed)
 
         return result
 

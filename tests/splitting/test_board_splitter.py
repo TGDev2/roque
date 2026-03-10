@@ -260,10 +260,42 @@ class TestDataclasses:
 class TestEdgeCases:
     def test_non_divisible_by_8_board_size(self) -> None:
         """Board size not perfectly divisible by 8 still produces 64 squares."""
-        # 645 // 8 = 80, remainder pixels are trimmed
-        scene, region = _make_scene_with_board(board_size=645)
+        board_size = 645
+        cell = board_size // 8
+
+        # Build an explicit 645x645 board region so remainder trimming is exercised.
+        board = np.zeros((board_size, board_size, 3), dtype=np.uint8)
+        for row in range(8):
+            for col in range(8):
+                y0, x0 = row * cell, col * cell
+                board[y0 : y0 + cell, x0 : x0 + cell] = (row * 8 + col + 10)
+
+        scene = np.full((1080, 1920, 3), 48, dtype=np.uint8)
+        board_x, board_y = 100, 50
+        scene[board_y : board_y + board_size, board_x : board_x + board_size] = board
+        region = BoardRegion(
+            x=board_x,
+            y=board_y,
+            width=board_size,
+            height=board_size,
+            confidence=0.95,
+        )
+
         result = BoardSplitter().split(scene, region)
         assert len(result.squares) == 64
+        assert result.squares["a1"].image.shape[:2] == (cell, cell)
+
+    def test_out_of_bounds_region_raises(self) -> None:
+        scene = np.zeros((100, 100, 3), dtype=np.uint8)
+        region = BoardRegion(x=60, y=60, width=50, height=50, confidence=0.9)
+        with pytest.raises(ValueError, match="out of frame bounds"):
+            BoardSplitter().split(scene, region)
+
+    def test_too_small_board_raises(self) -> None:
+        scene = np.zeros((100, 100, 3), dtype=np.uint8)
+        region = BoardRegion(x=10, y=10, width=7, height=7, confidence=0.9)
+        with pytest.raises(ValueError, match="too small"):
+            BoardSplitter().split(scene, region)
 
     def test_bgra_frame(self) -> None:
         """BGRA frames are handled (numpy slicing works on any channel count)."""
