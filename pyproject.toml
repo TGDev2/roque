@@ -23,7 +23,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"chesslab.recognition" = ["templates/**/*.png", "templates/**/*.json"]
+"chesslab.recognition" = ["templates/**/*.png", "templates/**/*.json", "themes.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

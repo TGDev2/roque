@@ -1,0 +1,52 @@
+{
+  "themes": [
+    {
+      "name": "green",
+      "source": "chess.com",
+      "light_bgr": [208, 236, 235],
+      "dark_bgr": [82, 149, 115]
+    },
+    {
+      "name": "brown",
+      "source": "chess.com",
+      "light_bgr": [181, 217, 240],
+      "dark_bgr": [99, 136, 181]
+    },
+    {
+      "name": "blue",
+      "source": "chess.com",
+      "light_bgr": [230, 227, 222],
+      "dark_bgr": [173, 162, 140]
+    },
+    {
+      "name": "purple",
+      "source": "chess.com",
+      "light_bgr": [244, 218, 232],
+      "dark_bgr": [203, 114, 155]
+    },
+    {
+      "name": "walnut",
+      "source": "chess.com",
+      "light_bgr": [140, 184, 218],
+      "dark_bgr": [73, 116, 164]
+    },
+    {
+      "name": "brown",
+      "source": "lichess",
+      "light_bgr": [178, 217, 240],
+      "dark_bgr": [107, 153, 181]
+    },
+    {
+      "name": "blue",
+      "source": "lichess",
+      "light_bgr": [222, 228, 227],
+      "dark_bgr": [187, 175, 136]
+    },
+    {
+      "name": "green",
+      "source": "lichess",
+      "light_bgr": [221, 255, 255],
+      "dark_bgr": [102, 166, 134]
+    }
+  ]
+}
