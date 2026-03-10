@@ -29,6 +29,7 @@ from chesslab.recognition.piece_recognizer import (
     _parse_template_key,
 )
 from chesslab.splitting.board_splitter import SquareImage
+from chesslab.splitting.square_color import square_background
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -144,7 +145,7 @@ def _make_empty_square(bg: str, size: int = SIZE) -> NDArray[np.uint8]:
 
 
 def _bg_for_square(file_idx: int, rank_idx: int) -> str:
-    return "light" if (file_idx + rank_idx) % 2 == 0 else "dark"
+    return square_background(file_idx, rank_idx)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +463,40 @@ class TestTemplateLoading:
             theme="empty_manifest", templates_dir=tmp_path / "themes",
         )
         with pytest.raises(TemplateLoadError, match="No templates"):
+            PieceRecognizer(config)
+
+    def test_incomplete_manifest_raises(self, tmp_path: Path) -> None:
+        theme_dir = tmp_path / "themes" / "incomplete"
+        theme_dir.mkdir(parents=True)
+        img = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
+        cv2.imwrite(str(theme_dir / "wK_light.png"), img)
+        manifest = {
+            "name": "incomplete",
+            "templates": {"wK_light": "wK_light.png"},
+        }
+        with (theme_dir / "theme.json").open("w") as fh:
+            json.dump(manifest, fh)
+
+        config = RecognitionConfig(
+            theme="incomplete", templates_dir=tmp_path / "themes",
+        )
+        with pytest.raises(TemplateLoadError, match="incomplete"):
+            PieceRecognizer(config)
+
+    def test_template_path_traversal_rejected(self, tmp_path: Path) -> None:
+        theme_dir = tmp_path / "themes" / "path_escape"
+        theme_dir.mkdir(parents=True)
+        manifest = {
+            "name": "path_escape",
+            "templates": {"wK_light": "../outside.png"},
+        }
+        with (theme_dir / "theme.json").open("w") as fh:
+            json.dump(manifest, fh)
+
+        config = RecognitionConfig(
+            theme="path_escape", templates_dir=tmp_path / "themes",
+        )
+        with pytest.raises(TemplateLoadError, match="escapes theme directory"):
             PieceRecognizer(config)
 
     def test_custom_templates_dir(self, tmp_path: Path) -> None:

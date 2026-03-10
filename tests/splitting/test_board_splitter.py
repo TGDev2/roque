@@ -23,6 +23,7 @@ from chesslab.splitting.board_splitter import (
     SplitResult,
     SquareImage,
 )
+from chesslab.splitting.square_color import is_light_square
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,7 +35,7 @@ DARK = (115, 149, 82)
 
 def _square_colour(file_idx: int, rank_idx: int) -> tuple[int, int, int]:
     """Return expected colour for a square given its file/rank indices."""
-    return LIGHT if (file_idx + rank_idx) % 2 == 0 else DARK
+    return LIGHT if is_light_square(file_idx, rank_idx) else DARK
 
 
 def _make_board_image(
@@ -46,7 +47,7 @@ def _make_board_image(
 
     The board is drawn in white perspective: top-left pixel is a8.
     Colour assignment follows chess convention: a1 is dark, so
-    square (file, rank) is light when (file + rank) is even.
+    square (file, rank) is light when (file + rank) is odd.
     In the image: row 0 = rank 8, col 0 = file a.
     """
     cell = size // 8
@@ -56,7 +57,7 @@ def _make_board_image(
         for col in range(8):
             file_idx = col
             rank_idx = 7 - row
-            colour = light if (file_idx + rank_idx) % 2 == 0 else dark
+            colour = light if is_light_square(file_idx, rank_idx) else dark
             y0, x0 = row * cell, col * cell
             cv2.rectangle(image, (x0, y0), (x0 + cell, y0 + cell), colour, -1)
     return image

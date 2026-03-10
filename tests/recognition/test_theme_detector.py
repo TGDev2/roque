@@ -19,11 +19,13 @@ from numpy.typing import NDArray
 
 from chesslab.recognition.theme_detector import (
     ThemeDetectionConfig,
+    ThemeConfigError,
     ThemeDetectionResult,
     ThemeDetector,
     ThemeSignature,
 )
 from chesslab.splitting.board_splitter import SquareImage
+from chesslab.splitting.square_color import square_background
 
 # ---------------------------------------------------------------------------
 # Constants — chess.com Green (BGR)
@@ -66,7 +68,7 @@ def _draw_pawn(img: NDArray[np.uint8], colour: tuple[int, int, int]) -> None:
 
 
 def _bg_for_square(file_idx: int, rank_idx: int) -> str:
-    return "light" if (file_idx + rank_idx) % 2 == 0 else "dark"
+    return square_background(file_idx, rank_idx)
 
 
 def _make_piece_square(
@@ -380,6 +382,14 @@ class TestDataclasses:
         assert config.max_distance == 30.0
         assert config.corner_patch_size == 4
 
+    def test_config_invalid_max_distance(self) -> None:
+        with pytest.raises(ValueError, match="max_distance"):
+            ThemeDetectionConfig(max_distance=0)
+
+    def test_config_invalid_corner_patch_size(self) -> None:
+        with pytest.raises(ValueError, match="corner_patch_size"):
+            ThemeDetectionConfig(corner_patch_size=0)
+
 
 # ---------------------------------------------------------------------------
 # List themes
@@ -401,3 +411,29 @@ class TestListThemes:
         config = ThemeDetectionConfig(themes_file=themes_file)
         detector = ThemeDetector(config)
         assert len(detector.list_themes()) == 2
+
+
+class TestValidation:
+    def test_detect_wrong_square_count_raises(self) -> None:
+        detector = ThemeDetector()
+        with pytest.raises(ValueError, match="Expected 64"):
+            detector.detect({})
+
+    def test_match_theme_requires_signatures(self) -> None:
+        light = np.array([0, 0, 0], dtype=np.float64)
+        dark = np.array([0, 0, 0], dtype=np.float64)
+        with pytest.raises(ValueError, match="At least one"):
+            ThemeDetector._match_theme(light, dark, [])
+
+    def test_init_with_empty_themes_file_raises(self, tmp_path: Path) -> None:
+        themes_file = _make_themes_file(tmp_path, [])
+        config = ThemeDetectionConfig(themes_file=themes_file)
+        with pytest.raises(ThemeConfigError, match="No themes configured"):
+            ThemeDetector(config)
+
+    def test_init_with_invalid_themes_structure_raises(self, tmp_path: Path) -> None:
+        themes_file = tmp_path / "themes.json"
+        themes_file.write_text('{"bad": []}')
+        config = ThemeDetectionConfig(themes_file=themes_file)
+        with pytest.raises(ThemeConfigError, match="missing 'themes' list"):
+            ThemeDetector(config)

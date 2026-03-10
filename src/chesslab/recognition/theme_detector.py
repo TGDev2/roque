@@ -17,11 +17,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from chesslab.splitting.board_splitter import SquareImage
+from chesslab.splitting.square_color import square_background
 
 logger = logging.getLogger(__name__)
 
 _THEMES_FILE = Path(__file__).parent / "themes.json"
 _CONFIG_DIR = Path.home() / ".chesslab"
+
+
+class ThemeDetectionError(RuntimeError):
+    """Base class for theme detection failures."""
+
+
+class ThemeConfigError(ThemeDetectionError):
+    """Raised when the theme signatures configuration is invalid."""
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -51,6 +60,16 @@ class ThemeDetectionConfig:
     corner_patch_size: int = 4
     config_dir: Path = field(default_factory=lambda: _CONFIG_DIR)
     themes_file: Path = field(default_factory=lambda: _THEMES_FILE)
+
+    def __post_init__(self) -> None:
+        if self.max_distance <= 0:
+            raise ValueError(
+                f"max_distance must be > 0, got {self.max_distance}.",
+            )
+        if self.corner_patch_size < 1:
+            raise ValueError(
+                f"corner_patch_size must be >= 1, got {self.corner_patch_size}.",
+            )
 
 
 @dataclass(frozen=True)
@@ -100,6 +119,9 @@ class ThemeDetector:
             Detection result with matched theme (or ``None``), distance,
             observed colours, and the list of available themes for fallback.
         """
+        if len(squares) != 64:
+            raise ValueError(f"Expected 64 squares, got {len(squares)}.")
+
         start = time.perf_counter()
 
         light_bgr, dark_bgr = self._extract_colours(squares)
@@ -215,20 +237,87 @@ class ThemeDetector:
 
     def _load_signatures(self) -> list[ThemeSignature]:
         """Load theme signatures from the themes file."""
-        with self._config.themes_file.open() as fh:
-            data = json.load(fh)
+        path = self._config.themes_file
+        try:
+            with path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ThemeConfigError(
+                f"Failed to read themes file: {path}.",
+            ) from exc
+
+        entries = data.get("themes")
+        if not isinstance(entries, list):
+            raise ThemeConfigError(
+                f"Invalid themes file structure in {path}: missing 'themes' list.",
+            )
 
         signatures: list[ThemeSignature] = []
-        for entry in data.get("themes", []):
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ThemeConfigError(
+                    f"Invalid theme entry at index {idx} in {path}.",
+                )
+
+            name = entry.get("name")
+            source = entry.get("source")
+            if not isinstance(name, str) or not name.strip():
+                raise ThemeConfigError(
+                    f"Invalid theme name at index {idx} in {path}.",
+                )
+            if not isinstance(source, str) or not source.strip():
+                raise ThemeConfigError(
+                    f"Invalid theme source at index {idx} in {path}.",
+                )
+
+            light = self._parse_colour_triplet(
+                entry.get("light_bgr"),
+                field_name="light_bgr",
+                idx=idx,
+                path=path,
+            )
+            dark = self._parse_colour_triplet(
+                entry.get("dark_bgr"),
+                field_name="dark_bgr",
+                idx=idx,
+                path=path,
+            )
             signatures.append(
                 ThemeSignature(
-                    name=entry["name"],
-                    source=entry["source"],
-                    light_bgr=tuple(entry["light_bgr"]),  # type: ignore[arg-type]
-                    dark_bgr=tuple(entry["dark_bgr"]),  # type: ignore[arg-type]
+                    name=name.strip(),
+                    source=source.strip(),
+                    light_bgr=light,
+                    dark_bgr=dark,
                 )
             )
+
+        if not signatures:
+            raise ThemeConfigError(f"No themes configured in {path}.")
+
         return signatures
+
+    @staticmethod
+    def _parse_colour_triplet(
+        value: object,
+        *,
+        field_name: str,
+        idx: int,
+        path: Path,
+    ) -> tuple[int, int, int]:
+        if not isinstance(value, list) or len(value) != 3:
+            raise ThemeConfigError(
+                f"Invalid {field_name} at index {idx} in {path}: expected 3 values.",
+            )
+
+        channels: list[int] = []
+        for raw in value:
+            if not isinstance(raw, int) or not (0 <= raw <= 255):
+                raise ThemeConfigError(
+                    f"Invalid {field_name} at index {idx} in {path}: "
+                    "values must be integers in [0, 255]."
+                )
+            channels.append(raw)
+        return channels[0], channels[1], channels[2]
 
     def _extract_colours(
         self,
@@ -245,10 +334,15 @@ class ThemeDetector:
 
         for square in squares.values():
             colour = self._sample_corner_colour(square.image, patch)
-            if (square.file + square.rank) % 2 == 0:
+            if square_background(square.file, square.rank) == "light":
                 light_colours.append(colour)
             else:
                 dark_colours.append(colour)
+
+        if not light_colours or not dark_colours:
+            raise ValueError(
+                "Unable to extract theme colours: expected both light and dark squares.",
+            )
 
         light_median = np.median(np.stack(light_colours), axis=0)
         dark_median = np.median(np.stack(dark_colours), axis=0)
@@ -267,9 +361,15 @@ class ThemeDetector:
         img = image
         if img.ndim == 3 and img.shape[2] == 4:
             img = img[:, :, :3]
+        if img.ndim != 3 or img.shape[2] != 3:
+            raise ValueError(f"Expected image shape (H, W, 3|4), got {image.shape}.")
 
         h, w = img.shape[:2]
         p = min(patch_size, h // 2, w // 2)
+        if p < 1:
+            raise ValueError(
+                f"Image too small for corner sampling: {h}x{w} (patch={patch_size}).",
+            )
 
         corners = np.concatenate([
             img[:p, :p].reshape(-1, 3),
@@ -291,6 +391,9 @@ class ThemeDetector:
         Returns:
             Tuple of (best_signature, best_distance).
         """
+        if not signatures:
+            raise ValueError("At least one theme signature is required.")
+
         best_sig = signatures[0]
         best_dist = float("inf")
 

@@ -19,6 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from chesslab.splitting.board_splitter import SquareImage
+from chesslab.splitting.square_color import square_background
 
 logger = logging.getLogger(__name__)
 
@@ -264,18 +265,34 @@ class PieceRecognizer:
                 f"Each theme directory must contain a theme.json file."
             )
 
-        with manifest_path.open() as fh:
-            manifest = json.load(fh)
+        try:
+            with manifest_path.open(encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TemplateLoadError(
+                f"Failed to read theme manifest: {manifest_path}.",
+            ) from exc
 
-        templates_map: dict[str, str] = manifest.get("templates", {})
-        if not templates_map:
+        templates_map = manifest.get("templates")
+        if not isinstance(templates_map, dict) or not templates_map:
             raise TemplateLoadError(
                 f"No templates listed in {manifest_path}."
             )
 
         for key, filename in templates_map.items():
-            piece, background = _parse_template_key(key)
-            filepath = theme_dir / filename
+            if not isinstance(filename, str) or not filename.strip():
+                raise TemplateLoadError(
+                    f"Invalid template filename for key '{key}' in {manifest_path}.",
+                )
+
+            try:
+                piece, background = _parse_template_key(key)
+            except ValueError as exc:
+                raise TemplateLoadError(
+                    f"Invalid template key '{key}' in {manifest_path}.",
+                ) from exc
+
+            filepath = self._resolve_template_path(theme_dir, filename)
             img = cv2.imread(str(filepath), cv2.IMREAD_COLOR)
             if img is None:
                 raise TemplateLoadError(
@@ -284,10 +301,41 @@ class PieceRecognizer:
                 )
             self._templates[background][piece] = img
 
+        self._validate_template_coverage(theme, manifest_path)
+
         loaded = sum(len(v) for v in self._templates.values())
         logger.debug(
             "Loaded %d templates for theme '%s'.", loaded, theme,
         )
+
+    @staticmethod
+    def _resolve_template_path(theme_dir: Path, filename: str) -> Path:
+        """Resolve a template file path and block path traversal."""
+        root = theme_dir.resolve()
+        resolved = (theme_dir / filename).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise TemplateLoadError(
+                f"Template path '{filename}' escapes theme directory '{theme_dir}'.",
+            ) from exc
+        return resolved
+
+    def _validate_template_coverage(self, theme: str, manifest_path: Path) -> None:
+        """Ensure the manifest provides all piece templates for both backgrounds."""
+        expected_pieces = set(_KEY_TO_PIECE.values())
+        missing: list[str] = []
+        for background in ("light", "dark"):
+            seen = set(self._templates[background].keys())
+            for piece in expected_pieces - seen:
+                missing.append(f"{_PIECE_TO_KEY[piece]}_{background}")
+
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+            raise TemplateLoadError(
+                f"Theme '{theme}' manifest is incomplete ({manifest_path}). "
+                f"Missing templates: {missing_str}."
+            )
 
     def _list_available_themes(self) -> list[str]:
         """Return names of theme directories that contain a theme.json."""
@@ -366,7 +414,7 @@ class PieceRecognizer:
         else:
             img_vec /= std
 
-        bg = "light" if (square.file + square.rank) % 2 == 0 else "dark"
+        bg = square_background(square.file, square.rank)
         pieces, matrix = self._normed.get(bg, ([], np.empty((0,), dtype=np.float32)))
 
         if len(pieces) == 0:
