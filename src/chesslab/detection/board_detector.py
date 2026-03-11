@@ -90,6 +90,8 @@ class BoardDetector:
             return result
 
         board, warning = self._full_detect(gray)
+        if board is not None:
+            board = self._snap_to_grid(board, frame_w=gray.shape[1], frame_h=gray.shape[0])
         elapsed = (time.perf_counter() - start) * 1000
 
         result = DetectionResult(
@@ -206,6 +208,85 @@ class BoardDetector:
             BoardRegion(x=bx, y=by, width=bw, height=bh, confidence=score),
             warning,
         )
+
+    # ------------------------------------------------------------------
+    # Grid snapping helpers
+    # ------------------------------------------------------------------
+
+    def _snap_to_grid(
+        self, board: BoardRegion, *, frame_w: int, frame_h: int,
+    ) -> BoardRegion:
+        """Adjust board bounds so width/height align with an 8x8 grid.
+
+        Detection can return off-by-1 (or a few) pixels around the board.
+        Snapping dimensions to multiples of 8 keeps square crops aligned.
+        """
+        x, w = self._snap_axis(board.x, board.width, frame_w)
+        y, h = self._snap_axis(board.y, board.height, frame_h)
+
+        side = min(w, h)
+        if side % 8 != 0:
+            side -= side % 8
+
+        if side < 8:
+            return board
+
+        if w != side:
+            x += (w - side) // 2
+        if h != side:
+            y += (h - side) // 2
+
+        x = max(0, min(x, frame_w - side))
+        y = max(0, min(y, frame_h - side))
+
+        return BoardRegion(
+            x=x,
+            y=y,
+            width=side,
+            height=side,
+            confidence=board.confidence,
+        )
+
+    @staticmethod
+    def _snap_axis(start: int, length: int, limit: int) -> tuple[int, int]:
+        """Snap one axis length to the nearest multiple of 8.
+
+        Preference order:
+        1) nearest multiple,
+        2) expand to include neighbouring pixels if possible,
+        3) shrink with centred crop.
+        """
+        if length < 8:
+            return start, length
+
+        lower = (length // 8) * 8
+        upper = lower + 8
+        candidates = sorted(
+            {c for c in (lower, upper) if c >= 8},
+            key=lambda c: (abs(c - length), -c),
+        )
+
+        for target in candidates:
+            if target == length:
+                return start, length
+
+            if target > length:
+                new_start = start
+                new_end = start + target
+                if new_end <= limit:
+                    return new_start, target
+
+                overflow = new_end - limit
+                if start - overflow >= 0:
+                    return start - overflow, target
+                continue
+
+            trim = length - target
+            new_start = start + trim // 2
+            new_start = max(0, min(new_start, limit - target))
+            return new_start, target
+
+        return start, length
 
     # ------------------------------------------------------------------
     # Fallback: Hough line detection
