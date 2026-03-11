@@ -1,4 +1,4 @@
-"""Tests for the position analyser — US-E4-01 acceptance criteria.
+"""Tests for the position analyser
 
 Covers:
 - Config validation (depth, time_limit, multipv, threads, hash_mb)
@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -656,3 +657,146 @@ class TestAnalysisResult:
         )
         with pytest.raises(AttributeError):
             var.rank = 2  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Analysis preferences persistence
+# ---------------------------------------------------------------------------
+
+
+class TestAnalysisPreferences:
+    """Saving and loading analysis depth/time_limit preferences."""
+
+    def test_save_and_load_roundtrip(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        AnalysisConfig.save_preference(depth=20, time_limit=3.0, config_dir=d)
+        result = AnalysisConfig.load_preference(config_dir=d)
+        assert result is not None
+        assert result["depth"] == 20
+        assert result["time_limit"] == 3.0
+
+    def test_save_creates_directory(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path)) / "nested" / "dir"
+        AnalysisConfig.save_preference(depth=15, time_limit=1.5, config_dir=d)
+        assert (d / "config.json").is_file()
+        result = AnalysisConfig.load_preference(config_dir=d)
+        assert result is not None
+        assert result["depth"] == 15
+
+    def test_save_preserves_other_keys(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        d.mkdir(parents=True, exist_ok=True)
+        config_file = d / "config.json"
+        config_file.write_text(json.dumps({"theme": "chess.com/green"}))
+
+        AnalysisConfig.save_preference(depth=18, time_limit=2.0, config_dir=d)
+
+        with config_file.open() as fh:
+            data = json.load(fh)
+        assert data["theme"] == "chess.com/green"
+        assert data["analysis"]["depth"] == 18
+
+    def test_load_nonexistent_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        assert AnalysisConfig.load_preference(config_dir=d) is None
+
+    def test_load_corrupt_json_returns_none(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text("not valid json {{{")
+        assert AnalysisConfig.load_preference(config_dir=d) is None
+
+    def test_save_overwrites_previous(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        AnalysisConfig.save_preference(depth=12, time_limit=1.0, config_dir=d)
+        AnalysisConfig.save_preference(depth=22, time_limit=5.0, config_dir=d)
+        result = AnalysisConfig.load_preference(config_dir=d)
+        assert result is not None
+        assert result["depth"] == 22
+        assert result["time_limit"] == 5.0
+
+    def test_save_depth_below_min_raises(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        with pytest.raises(ValueError, match="depth must be between"):
+            AnalysisConfig.save_preference(depth=5, time_limit=2.0, config_dir=d)
+
+    def test_save_depth_above_max_raises(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        with pytest.raises(ValueError, match="depth must be between"):
+            AnalysisConfig.save_preference(depth=30, time_limit=2.0, config_dir=d)
+
+    def test_save_depth_at_boundaries(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        AnalysisConfig.save_preference(depth=10, time_limit=1.0, config_dir=d)
+        result = AnalysisConfig.load_preference(config_dir=d)
+        assert result is not None
+        assert result["depth"] == 10
+
+        AnalysisConfig.save_preference(depth=25, time_limit=1.0, config_dir=d)
+        result = AnalysisConfig.load_preference(config_dir=d)
+        assert result is not None
+        assert result["depth"] == 25
+
+    def test_save_invalid_time_limit_raises(self, tmp_path: object) -> None:
+        from pathlib import Path
+
+        d = Path(str(tmp_path))
+        with pytest.raises(ValueError, match="time_limit must be > 0"):
+            AnalysisConfig.save_preference(depth=18, time_limit=0, config_dir=d)
+        with pytest.raises(ValueError, match="time_limit must be > 0"):
+            AnalysisConfig.save_preference(depth=18, time_limit=-1.0, config_dir=d)
+
+    def test_min_max_constants(self) -> None:
+        assert AnalysisConfig.MIN_USER_DEPTH == 10
+        assert AnalysisConfig.MAX_USER_DEPTH == 25
+
+
+# ---------------------------------------------------------------------------
+# stimated analysis time
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateAnalysisTime:
+    """Heuristic analysis time estimation."""
+
+    def test_returns_float(self) -> None:
+        result = AnalysisConfig.estimate_analysis_time(depth=18)
+        assert isinstance(result, float)
+
+    def test_increases_with_depth(self) -> None:
+        t15 = AnalysisConfig.estimate_analysis_time(depth=15, threads=1)
+        t20 = AnalysisConfig.estimate_analysis_time(depth=20, threads=1)
+        assert t20 > t15
+
+    def test_decreases_with_more_threads(self) -> None:
+        t1 = AnalysisConfig.estimate_analysis_time(depth=20, threads=1)
+        t8 = AnalysisConfig.estimate_analysis_time(depth=20, threads=8)
+        assert t8 < t1
+
+    def test_clamped_to_bounds(self) -> None:
+        low = AnalysisConfig.estimate_analysis_time(depth=1, threads=1)
+        assert low >= 0.1
+        high = AnalysisConfig.estimate_analysis_time(depth=50, threads=1)
+        assert high <= 300.0
+
+    def test_depth_10_baseline_reasonable(self) -> None:
+        t = AnalysisConfig.estimate_analysis_time(depth=10, threads=1)
+        assert 0.1 <= t <= 1.0

@@ -1,4 +1,4 @@
-"""Tests for the FEN generator — US-E3-01 acceptance criteria.
+"""Tests for the FEN generator
 
 Covers 20 reference positions (starting, openings, middlegame, endgame),
 invalid position rejection, and python-chess cross-validation.

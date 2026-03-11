@@ -1,4 +1,4 @@
-"""Tests for the position watcher — US-E3-03 acceptance criteria.
+"""Tests for the position watcher
 
 Covers position change detection via FEN hash comparison, debounce
 behaviour, cooperative cancellation of in-flight analysis, no-change

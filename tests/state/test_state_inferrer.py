@@ -1,4 +1,4 @@
-"""Tests for the state inferrer — US-E3-02 acceptance criteria.
+"""Tests for the state inferrer
 
 Covers castling rights inference from piece positions, active color
 detection with user fallback signalling, config validation, and

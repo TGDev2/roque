@@ -21,15 +21,21 @@ Limitations
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import ClassVar
 
 import chess
 import chess.engine
 
 logger = logging.getLogger(__name__)
+
+_CONFIG_DIR = Path.home() / ".chesslab"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +82,9 @@ class AnalysisConfig:
         Hash table size in megabytes for Stockfish.  Default 128.
     """
 
+    MIN_USER_DEPTH: ClassVar[int] = 10
+    MAX_USER_DEPTH: ClassVar[int] = 25
+
     stockfish_path: str = "stockfish"
     depth: int = 18
     time_limit: float = 2.0
@@ -94,6 +103,127 @@ class AnalysisConfig:
             raise ValueError(f"threads must be >= 1 or None, got {self.threads}.")
         if self.hash_mb < 1:
             raise ValueError(f"hash_mb must be >= 1, got {self.hash_mb}.")
+
+    # -- Persistence ---------------------------------------------------------
+
+    @staticmethod
+    def save_preference(
+        depth: int,
+        time_limit: float,
+        config_dir: Path | None = None,
+    ) -> None:
+        """Persist analysis preferences to the user config file.
+
+        Parameters
+        ----------
+        depth:
+            Search depth.  Must be in ``[MIN_USER_DEPTH, MAX_USER_DEPTH]``.
+        time_limit:
+            Maximum analysis time in seconds.  Must be > 0.
+        config_dir:
+            Override for the config directory (default ``~/.chesslab``).
+
+        Raises
+        ------
+        ValueError
+            If *depth* or *time_limit* is outside the allowed range.
+        """
+        if not (AnalysisConfig.MIN_USER_DEPTH <= depth <= AnalysisConfig.MAX_USER_DEPTH):
+            raise ValueError(
+                f"depth must be between {AnalysisConfig.MIN_USER_DEPTH} and "
+                f"{AnalysisConfig.MAX_USER_DEPTH}, got {depth}.",
+            )
+        if time_limit <= 0:
+            raise ValueError(f"time_limit must be > 0, got {time_limit}.")
+
+        directory = config_dir or _CONFIG_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        config_file = directory / "config.json"
+
+        data: dict[str, object] = {}
+        if config_file.is_file():
+            try:
+                with config_file.open() as fh:
+                    data = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                data = {}
+
+        data["analysis"] = {"depth": depth, "time_limit": time_limit}
+        with config_file.open("w") as fh:
+            json.dump(data, fh, indent=2)
+
+        logger.info(
+            "Analysis preference saved: depth=%d time_limit=%.1f.",
+            depth,
+            time_limit,
+        )
+
+    @staticmethod
+    def load_preference(config_dir: Path | None = None) -> dict[str, object] | None:
+        """Load persisted analysis preferences.
+
+        Returns
+        -------
+        dict or None
+            A dict with ``"depth"`` (int) and ``"time_limit"`` (float) keys,
+            or ``None`` if no preference has been saved or the config file is
+            missing / corrupt.
+        """
+        directory = config_dir or _CONFIG_DIR
+        config_file = directory / "config.json"
+
+        if not config_file.is_file():
+            return None
+
+        try:
+            with config_file.open() as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Failed to read config file: %s.", config_file)
+            return None
+
+        analysis = data.get("analysis")
+        if not isinstance(analysis, dict):
+            return None
+
+        depth = analysis.get("depth")
+        time_limit = analysis.get("time_limit")
+        if isinstance(depth, int) and isinstance(time_limit, (int, float)):
+            return {"depth": depth, "time_limit": float(time_limit)}
+        return None
+
+    @staticmethod
+    def estimate_analysis_time(
+        depth: int,
+        threads: int | None = None,
+    ) -> float:
+        """Estimate wall-clock analysis time for a given depth.
+
+        Uses a simple exponential heuristic.  The estimate is indicative and
+        depends heavily on the position complexity and hardware.
+
+        Parameters
+        ----------
+        depth:
+            Search depth.
+        threads:
+            Number of Stockfish threads.  ``None`` means auto-detect.
+
+        Returns
+        -------
+        float
+            Estimated analysis time in seconds, rounded to one decimal place.
+        """
+        base_time = 0.1  # seconds at depth 10
+        branching_factor = 1.35
+
+        raw = base_time * branching_factor ** (depth - 10)
+
+        effective_threads = threads if threads is not None else max(1, (os.cpu_count() or 1) - 1)
+        raw /= math.sqrt(effective_threads)
+
+        clamped = max(0.1, min(raw, 300.0))
+        return round(clamped, 1)
 
 
 @dataclass(frozen=True)
