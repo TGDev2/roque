@@ -210,6 +210,17 @@ def _make_handler(service: RemoteFrameService) -> type[BaseHTTPRequestHandler]:
     return RequestHandler
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Ignore expected disconnect errors from short-lived clients."""
+
+    def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
+        _, exc, _ = sys.exc_info()
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError)):
+            logger.debug("Client disconnected %s:%s (%s).", client_address[0], client_address[1], exc)
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> int:
     args = _parse_args()
     logging.basicConfig(
@@ -228,7 +239,10 @@ def main() -> int:
             fullmove_number=args.fullmove,
         )
     )
-    server = ThreadingHTTPServer((args.host, args.port), _make_handler(RemoteFrameService(processor)))
+    server = QuietThreadingHTTPServer(
+        (args.host, args.port),
+        _make_handler(RemoteFrameService(processor)),
+    )
 
     logger.info(
         "Listening on http://%s:%d with theme=%s white_perspective=%s",
