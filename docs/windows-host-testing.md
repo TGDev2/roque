@@ -74,10 +74,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows_capture_to_vm.ps1 `
   -IntervalMs 500
 ```
 
+Example selecting the capture region with the mouse:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows_capture_to_vm.ps1 `
+  -Uri http://<vm-ip>:8765/frame `
+  -SelectRegion `
+  -IntervalMs 500
+```
+
 Notes:
 
 - With no crop, the script captures the full virtual desktop.
 - With `-PrimaryScreenOnly`, it captures only the main screen.
+- With `-SelectRegion`, the script opens a one-time overlay: drag the mouse over the board area, release to confirm, `Esc` to cancel.
+- `-PrimaryScreenOnly` can be combined with `-SelectRegion` to limit the overlay to the main screen only.
+- If `-SelectRegion` is used, explicit `-Left/-Top/-Width/-Height` values are ignored.
 - The Python side still runs board detection, so the crop does not need to be exact.
 - A smaller crop reduces transfer size and latency.
 
@@ -99,7 +111,7 @@ detected.
 - Keep the board theme on chess.com set to `green`.
 - Keep the board large and fully visible.
 - Avoid overlays or browser zoom changes while calibrating.
-- Start with a cropped region around the browser window if full-screen capture is noisy.
+- Start with `-SelectRegion` or a cropped region around the browser window if full-screen capture is noisy.
 
 ## 6. Quick troubleshooting
 

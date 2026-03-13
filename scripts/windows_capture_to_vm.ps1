@@ -5,6 +5,7 @@ param(
     [int]$Top = 0,
     [int]$Width = 0,
     [int]$Height = 0,
+    [switch]$SelectRegion,
     [switch]$PrimaryScreenOnly,
     [switch]$Once
 )
@@ -15,16 +16,189 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+function New-SelectionRectangle {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Drawing.Point]$Start,
+        [Parameter(Mandatory = $true)]
+        [System.Drawing.Point]$End
+    )
+
+    $left = [Math]::Min($Start.X, $End.X)
+    $top = [Math]::Min($Start.Y, $End.Y)
+    $width = [Math]::Abs($End.X - $Start.X)
+    $height = [Math]::Abs($End.Y - $Start.Y)
+    return [System.Drawing.Rectangle]::new($left, $top, $width, $height)
+}
+
+function Select-CaptureBounds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Drawing.Rectangle]$SurfaceBounds
+    )
+
+    $state = [pscustomobject]@{
+        DragStart = [System.Drawing.Point]::Empty
+        Selection = [System.Drawing.Rectangle]::Empty
+        IsDragging = $false
+        Result = $null
+    }
+
+    $form = [System.Windows.Forms.Form]::new()
+    $font = [System.Drawing.Font]::new("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+    $instructionBrush = [System.Drawing.SolidBrush]::new(
+        [System.Drawing.Color]::FromArgb(235, 255, 255, 255)
+    )
+    $selectionBrush = [System.Drawing.SolidBrush]::new(
+        [System.Drawing.Color]::FromArgb(80, 76, 175, 80)
+    )
+    $selectionPen = [System.Drawing.Pen]::new(
+        [System.Drawing.Color]::FromArgb(255, 76, 175, 80),
+        3
+    )
+
+    try {
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+        $form.Bounds = $SurfaceBounds
+        $form.TopMost = $true
+        $form.ShowInTaskbar = $false
+        $form.BackColor = [System.Drawing.Color]::Black
+        $form.Opacity = 0.35
+        $form.Cursor = [System.Windows.Forms.Cursors]::Cross
+        $form.KeyPreview = $true
+        $form.Text = "ChessLab Capture Region Selector"
+
+        $form.Add_Shown({
+            param($sender, $eventArgs)
+            $sender.Activate()
+        })
+
+        $form.Add_KeyDown({
+            param($sender, $eventArgs)
+            if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+                $sender.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+                $sender.Close()
+            }
+        })
+
+        $form.Add_MouseDown({
+            param($sender, $eventArgs)
+            if ($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+                $sender.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+                $sender.Close()
+                return
+            }
+            if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) {
+                return
+            }
+
+            $state.DragStart = $eventArgs.Location
+            $state.Selection = [System.Drawing.Rectangle]::Empty
+            $state.IsDragging = $true
+            $sender.Invalidate()
+        })
+
+        $form.Add_MouseMove({
+            param($sender, $eventArgs)
+            if (-not $state.IsDragging) {
+                return
+            }
+
+            $state.Selection = New-SelectionRectangle -Start $state.DragStart -End $eventArgs.Location
+            $sender.Invalidate()
+        })
+
+        $form.Add_MouseUp({
+            param($sender, $eventArgs)
+            if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left -or -not $state.IsDragging) {
+                return
+            }
+
+            $state.Selection = New-SelectionRectangle -Start $state.DragStart -End $eventArgs.Location
+            $state.IsDragging = $false
+
+            if ($state.Selection.Width -lt 8 -or $state.Selection.Height -lt 8) {
+                $state.Selection = [System.Drawing.Rectangle]::Empty
+                $sender.Invalidate()
+                return
+            }
+
+            $state.Result = [System.Drawing.Rectangle]::new(
+                $SurfaceBounds.Left + $state.Selection.X,
+                $SurfaceBounds.Top + $state.Selection.Y,
+                $state.Selection.Width,
+                $state.Selection.Height
+            )
+            $sender.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $sender.Close()
+        })
+
+        $form.Add_Paint({
+            param($sender, $eventArgs)
+            $graphics = $eventArgs.Graphics
+            $graphics.DrawString(
+                "Drag to select the chessboard area. Esc or right click cancels.",
+                $font,
+                $instructionBrush,
+                24,
+                24
+            )
+
+            if ($state.Selection.Width -le 0 -or $state.Selection.Height -le 0) {
+                return
+            }
+
+            $graphics.FillRectangle($selectionBrush, $state.Selection)
+            $graphics.DrawRectangle($selectionPen, $state.Selection)
+
+            $labelY = [Math]::Max(12, $state.Selection.Y - 34)
+            $graphics.DrawString(
+                ("{0} x {1}" -f $state.Selection.Width, $state.Selection.Height),
+                $font,
+                $instructionBrush,
+                $state.Selection.X + 8,
+                $labelY
+            )
+        })
+
+        $dialogResult = $form.ShowDialog()
+    }
+    finally {
+        $selectionPen.Dispose()
+        $selectionBrush.Dispose()
+        $instructionBrush.Dispose()
+        $font.Dispose()
+        $form.Dispose()
+    }
+
+    if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK -or $null -eq $state.Result) {
+        throw "Region selection cancelled."
+    }
+
+    return $state.Result
+}
+
 function Get-CaptureBounds {
+    $surfaceBounds = if ($PrimaryScreenOnly) {
+        [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    }
+    else {
+        [System.Windows.Forms.SystemInformation]::VirtualScreen
+    }
+
+    if ($SelectRegion) {
+        if ($Width -gt 0 -or $Height -gt 0 -or $Left -ne 0 -or $Top -ne 0) {
+            Write-Warning "Ignoring -Left/-Top/-Width/-Height because -SelectRegion was specified."
+        }
+        return Select-CaptureBounds -SurfaceBounds $surfaceBounds
+    }
+
     if ($Width -gt 0 -and $Height -gt 0) {
         return [System.Drawing.Rectangle]::new($Left, $Top, $Width, $Height)
     }
 
-    if ($PrimaryScreenOnly) {
-        return [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    }
-
-    return [System.Windows.Forms.SystemInformation]::VirtualScreen
+    return $surfaceBounds
 }
 
 function Capture-PngBytes {
