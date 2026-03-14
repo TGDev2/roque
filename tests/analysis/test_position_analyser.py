@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -26,6 +27,8 @@ from chesslab.analysis.position_analyser import (
     AnalysisConfig,
     AnalysisError,
     AnalysisResult,
+    ContinuousAnalysisHandle,
+    ContinuousUpdate,
     EngineClosedError,
     EngineNotFoundError,
     Evaluation,
@@ -800,3 +803,267 @@ class TestEstimateAnalysisTime:
     def test_depth_10_baseline_reasonable(self) -> None:
         t = AnalysisConfig.estimate_analysis_time(depth=10, threads=1)
         assert 0.1 <= t <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Continuous analysis helpers
+# ---------------------------------------------------------------------------
+
+_SYNC_TIMEOUT_S = 2.0
+
+
+def _make_mock_analysis_stream(
+    infos_sequence: list[chess.engine.InfoDict],
+    multipv_groups: list[list[chess.engine.InfoDict]],
+) -> MagicMock:
+    """Create a mock SimpleAnalysisResult for continuous analysis.
+
+    Parameters
+    ----------
+    infos_sequence:
+        InfoDicts yielded one at a time by __iter__.
+    multipv_groups:
+        Successive values for the ``multipv`` property, one per iteration.
+    """
+    stream = MagicMock()
+    stream.__enter__ = MagicMock(return_value=stream)
+    stream.__exit__ = MagicMock(return_value=False)
+    stream.__iter__ = MagicMock(return_value=iter(infos_sequence))
+
+    multipv_iter = iter(multipv_groups)
+    type(stream).multipv = property(lambda self: next(multipv_iter, []))
+
+    return stream
+
+
+# ---------------------------------------------------------------------------
+# AC: Continuous analysis (US2)
+# ---------------------------------------------------------------------------
+
+
+class TestContinuousAnalysis:
+    """analyse_continuous() streams updates as depth increases."""
+
+    def test_callback_called_per_depth_increase(self) -> None:
+        """AC2: Suggestions update when depth increases."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+        d2d4 = board.parse_uci("d2d4")
+
+        info_d10 = _make_info(score=_make_pov_score_cp(20), pv=[e2e4], depth=10)
+        info_d12 = _make_info(score=_make_pov_score_cp(25), pv=[e2e4], depth=12)
+        info_d12_pv2 = _make_info(score=_make_pov_score_cp(15), pv=[d2d4], depth=12)
+
+        multipv_d10 = [info_d10]
+        multipv_d12 = [info_d12, info_d12_pv2]
+
+        stream = _make_mock_analysis_stream(
+            infos_sequence=[info_d10, info_d12],
+            multipv_groups=[multipv_d10, multipv_d12],
+        )
+        mock_engine.analysis.return_value = stream
+
+        updates: list[ContinuousUpdate] = []
+        done = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            if update.depth_reached >= 12:
+                done.set()
+
+        handle = analyser.analyse_continuous(STARTING_FEN, on_update)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert len(updates) == 2
+        assert updates[0].depth_reached == 10
+        assert updates[1].depth_reached == 12
+        assert updates[1].best_move_san == "e4"
+        assert len(updates[1].variations) == 2
+
+    def test_handle_stop_cancels_analysis(self) -> None:
+        """AC4: Analysis stops when handle.stop() is called."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+        info_d10 = _make_info(score=_make_pov_score_cp(20), pv=[e2e4], depth=10)
+
+        # Stream that blocks forever after first info.
+        blocking_event = threading.Event()
+
+        def blocking_iter():
+            yield info_d10
+            blocking_event.wait(timeout=_SYNC_TIMEOUT_S)
+
+        stream = MagicMock()
+        stream.__enter__ = MagicMock(return_value=stream)
+        stream.__exit__ = MagicMock(return_value=False)
+        stream.__iter__ = MagicMock(side_effect=lambda: blocking_iter())
+        type(stream).multipv = property(lambda self: [info_d10])
+
+        mock_engine.analysis.return_value = stream
+
+        updates: list[ContinuousUpdate] = []
+        got_first = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            got_first.set()
+
+        handle = analyser.analyse_continuous(STARTING_FEN, on_update)
+        assert got_first.wait(timeout=_SYNC_TIMEOUT_S)
+
+        handle.stop()
+        blocking_event.set()  # Unblock the iterator.
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert not handle.is_running
+        assert len(updates) == 1
+
+    def test_three_variations_returned(self) -> None:
+        """AC3: 3 best variations are always provided."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+        d2d4 = board.parse_uci("d2d4")
+        g1f3 = board.parse_uci("g1f3")
+
+        info1 = _make_info(score=_make_pov_score_cp(30), pv=[e2e4], depth=15)
+        info2 = _make_info(score=_make_pov_score_cp(25), pv=[d2d4], depth=15)
+        info3 = _make_info(score=_make_pov_score_cp(15), pv=[g1f3], depth=15)
+
+        multipv = [info1, info2, info3]
+
+        stream = _make_mock_analysis_stream(
+            infos_sequence=[info1],
+            multipv_groups=[multipv],
+        )
+        mock_engine.analysis.return_value = stream
+
+        updates: list[ContinuousUpdate] = []
+        done = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            done.set()
+
+        handle = analyser.analyse_continuous(STARTING_FEN, on_update)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert len(updates) >= 1
+        assert len(updates[-1].variations) == 3
+        assert updates[-1].variations[0].rank == 1
+        assert updates[-1].variations[1].rank == 2
+        assert updates[-1].variations[2].rank == 3
+
+    def test_evaluation_displayed(self) -> None:
+        """AC6: Evaluation (centipawns or mate) is provided."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+
+        info = _make_info(score=_make_pov_score_cp(42), pv=[e2e4], depth=10)
+        stream = _make_mock_analysis_stream(
+            infos_sequence=[info],
+            multipv_groups=[[info]],
+        )
+        mock_engine.analysis.return_value = stream
+
+        updates: list[ContinuousUpdate] = []
+        done = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            done.set()
+
+        handle = analyser.analyse_continuous(STARTING_FEN, on_update)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert updates[0].evaluation.centipawns == 42
+        assert str(updates[0].evaluation) == "+0.42"
+
+    def test_checkmate_terminal_emits_single_update(self) -> None:
+        """Terminal checkmate emits one update without engine call."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        updates: list[ContinuousUpdate] = []
+        done = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            done.set()
+
+        handle = analyser.analyse_continuous(CHECKMATE_FEN, on_update)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert len(updates) == 1
+        assert updates[0].evaluation.mate_in == 0
+        assert updates[0].variations == ()
+        mock_engine.analysis.assert_not_called()
+
+    def test_stalemate_terminal_emits_single_update(self) -> None:
+        """Terminal stalemate emits one update without engine call."""
+        analyser, mock_engine = _make_analyser_with_mock()
+
+        updates: list[ContinuousUpdate] = []
+        done = threading.Event()
+
+        def on_update(update: ContinuousUpdate) -> None:
+            updates.append(update)
+            done.set()
+
+        handle = analyser.analyse_continuous(STALEMATE_FEN, on_update)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert len(updates) == 1
+        assert updates[0].evaluation.centipawns == 0
+        mock_engine.analysis.assert_not_called()
+
+    def test_engine_closed_raises(self) -> None:
+        """analyse_continuous raises when engine not started."""
+        analyser = PositionAnalyser()
+        with pytest.raises(EngineClosedError):
+            analyser.analyse_continuous(STARTING_FEN, lambda u: None)
+
+    def test_invalid_fen_raises(self) -> None:
+        """analyse_continuous raises on invalid FEN."""
+        analyser, _ = _make_analyser_with_mock()
+        with pytest.raises(AnalysisError, match="Invalid FEN"):
+            analyser.analyse_continuous("not a fen", lambda u: None)
+
+    def test_configurable_depth_and_time(self) -> None:
+        """AC5: Configurable depth and time limit passed to engine."""
+        config = AnalysisConfig(depth=22, time_limit=5.0, multipv=2)
+        analyser, mock_engine = _make_analyser_with_mock(config)
+
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+        info = _make_info(score=_make_pov_score_cp(20), pv=[e2e4], depth=22)
+
+        stream = _make_mock_analysis_stream(
+            infos_sequence=[info],
+            multipv_groups=[[info]],
+        )
+        mock_engine.analysis.return_value = stream
+
+        done = threading.Event()
+        handle = analyser.analyse_continuous(
+            STARTING_FEN, lambda u: done.set(),
+        )
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        call_args = mock_engine.analysis.call_args
+        limit = call_args[0][1]
+        assert limit.depth == 22
+        assert limit.time == 5.0
+        assert call_args[1]["multipv"] == 2

@@ -25,10 +25,11 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
+from typing import Callable, ClassVar
 
 import chess
 import chess.engine
@@ -324,6 +325,69 @@ class AnalysisResult:
     elapsed_ms: float
 
 
+@dataclass(frozen=True)
+class ContinuousUpdate:
+    """An incremental analysis update emitted during continuous analysis.
+
+    Attributes
+    ----------
+    fen:
+        The FEN string being analysed.
+    variations:
+        Principal variations at the current depth, sorted by rank.
+    evaluation:
+        The top-line evaluation at the current depth.
+    best_move_uci:
+        Best move in UCI notation.
+    best_move_san:
+        Best move in Standard Algebraic Notation.
+    depth_reached:
+        Search depth reached for this update.
+    elapsed_ms:
+        Wall-clock time since analysis started, in milliseconds.
+    """
+
+    fen: str
+    variations: tuple[VariationInfo, ...]
+    evaluation: Evaluation
+    best_move_uci: str
+    best_move_san: str
+    depth_reached: int
+    elapsed_ms: float
+
+
+AnalysisCallback = Callable[[ContinuousUpdate], None]
+
+
+class ContinuousAnalysisHandle:
+    """Handle for a running continuous analysis.
+
+    Returned by :meth:`PositionAnalyser.analyse_continuous`.  Call
+    :meth:`stop` to cancel the analysis early.
+    """
+
+    def __init__(
+        self,
+        stop_event: threading.Event,
+        thread: threading.Thread,
+    ) -> None:
+        self._stop_event = stop_event
+        self._thread = thread
+
+    def stop(self) -> None:
+        """Signal the analysis to stop."""
+        self._stop_event.set()
+
+    @property
+    def is_running(self) -> bool:
+        """``True`` if the analysis thread is still alive."""
+        return self._thread.is_alive()
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Block until the analysis thread finishes."""
+        self._thread.join(timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
@@ -521,6 +585,155 @@ class PositionAnalyser:
             is_partial=is_partial,
             elapsed_ms=elapsed,
         )
+
+    # -- Continuous analysis --------------------------------------------------
+
+    def analyse_continuous(
+        self,
+        fen: str,
+        callback: AnalysisCallback,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> ContinuousAnalysisHandle:
+        """Start continuous analysis, calling *callback* as depth increases.
+
+        The analysis runs on a daemon thread and emits a
+        :class:`ContinuousUpdate` each time a new depth is fully reported
+        across all principal variations.  The analysis stops when the
+        configured depth or time limit is reached, or when the returned
+        handle's :meth:`~ContinuousAnalysisHandle.stop` is called.
+
+        Parameters
+        ----------
+        fen:
+            A valid FEN string.
+        callback:
+            Called with a :class:`ContinuousUpdate` each time depth increases.
+        stop_event:
+            Optional external cancellation event.  If ``None`` a new one is
+            created internally.
+
+        Returns
+        -------
+        ContinuousAnalysisHandle
+            A handle to stop or wait for the analysis.
+
+        Raises
+        ------
+        EngineClosedError
+            If the engine has not been started.
+        AnalysisError
+            If the FEN is invalid.
+        """
+        if self._engine is None:
+            raise EngineClosedError("Engine is not running. Call start() first.")
+
+        try:
+            board = chess.Board(fen)
+        except ValueError as exc:
+            raise AnalysisError(f"Invalid FEN: {exc}") from exc
+
+        event = stop_event or threading.Event()
+        thread = threading.Thread(
+            target=self._continuous_worker,
+            args=(board, fen, callback, event),
+            daemon=True,
+            name="continuous-analysis",
+        )
+        thread.start()
+        return ContinuousAnalysisHandle(event, thread)
+
+    def _continuous_worker(
+        self,
+        board: chess.Board,
+        fen: str,
+        callback: AnalysisCallback,
+        stop_event: threading.Event,
+    ) -> None:
+        """Background worker for continuous analysis."""
+        t0 = time.perf_counter()
+
+        # Terminal positions — emit single update and return.
+        if board.is_checkmate():
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            callback(ContinuousUpdate(
+                fen=fen,
+                variations=(),
+                evaluation=Evaluation(centipawns=None, mate_in=0),
+                best_move_uci="",
+                best_move_san="",
+                depth_reached=0,
+                elapsed_ms=elapsed,
+            ))
+            return
+
+        if board.is_stalemate():
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            callback(ContinuousUpdate(
+                fen=fen,
+                variations=(),
+                evaluation=Evaluation(centipawns=0, mate_in=None),
+                best_move_uci="",
+                best_move_san="",
+                depth_reached=0,
+                elapsed_ms=elapsed,
+            ))
+            return
+
+        limit = chess.engine.Limit(
+            depth=self._config.depth,
+            time=self._config.time_limit,
+        )
+
+        try:
+            with self._engine.analysis(
+                board, limit, multipv=self._config.multipv,
+            ) as stream:
+                previous_depth = 0
+                for _info in stream:
+                    if stop_event.is_set():
+                        stream.stop()
+                        break
+
+                    # Read grouped multi-PV state.
+                    multipv_infos = stream.multipv
+                    if not multipv_infos:
+                        continue
+
+                    current_depth = multipv_infos[0].get("depth", 0)
+                    if current_depth <= previous_depth:
+                        continue
+
+                    previous_depth = current_depth
+                    elapsed = (time.perf_counter() - t0) * 1000.0
+
+                    variations: list[VariationInfo] = []
+                    for rank, info in enumerate(multipv_infos, start=1):
+                        variations.append(
+                            self._to_variation_info(info, board, rank),
+                        )
+
+                    best_uci = variations[0].move_uci if variations else ""
+                    best_san = variations[0].move_san if variations else ""
+                    evaluation = (
+                        variations[0].evaluation
+                        if variations
+                        else Evaluation(centipawns=0, mate_in=None)
+                    )
+
+                    callback(ContinuousUpdate(
+                        fen=fen,
+                        variations=tuple(variations),
+                        evaluation=evaluation,
+                        best_move_uci=best_uci,
+                        best_move_san=best_san,
+                        depth_reached=current_depth,
+                        elapsed_ms=elapsed,
+                    ))
+        except chess.engine.EngineTerminatedError:
+            logger.debug("Engine terminated during continuous analysis.")
+        except Exception:
+            logger.exception("Continuous analysis worker failed.")
 
     # -- Private helpers -----------------------------------------------------
 

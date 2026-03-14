@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -21,9 +22,11 @@ import chess.engine
 import pytest
 
 from chesslab.analysis import AnalysisConfig
+from chesslab.analysis import ContinuousUpdate, Evaluation, VariationInfo
 from chesslab.coach.game_coach import (
     CoachConfig,
     CoachError,
+    ContinuousAdvice,
     GameCoach,
     GameOverError,
     IllegalMoveError,
@@ -553,3 +556,205 @@ class TestErrorHierarchy:
 
     def test_coach_error_is_runtime_error(self) -> None:
         assert issubclass(CoachError, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
+# Continuous analysis helpers
+# ---------------------------------------------------------------------------
+
+_SYNC_TIMEOUT_S = 2.0
+
+
+def _make_continuous_update(
+    fen: str,
+    best_san: str = "e5",
+    cp: int = 0,
+    depth: int = 10,
+) -> ContinuousUpdate:
+    """Build a minimal ContinuousUpdate for testing."""
+    return ContinuousUpdate(
+        fen=fen,
+        variations=(
+            VariationInfo(
+                rank=1,
+                move_uci="e7e5",
+                move_san=best_san,
+                evaluation=Evaluation(centipawns=cp, mate_in=None),
+                pv_uci=("e7e5",),
+                pv_san=(best_san,),
+                depth=depth,
+            ),
+        ),
+        evaluation=Evaluation(centipawns=cp, mate_in=None),
+        best_move_uci="e7e5",
+        best_move_san=best_san,
+        depth_reached=depth,
+        elapsed_ms=50.0,
+    )
+
+
+def _setup_mock_continuous(
+    mock_engine: MagicMock,
+    updates: list[ContinuousUpdate],
+) -> None:
+    """Configure mock engine.analysis() to yield updates via a fake stream."""
+    infos = []
+    multipv_groups = []
+    for update in updates:
+        info: chess.engine.InfoDict = {
+            "score": chess.engine.PovScore(
+                chess.engine.Cp(
+                    update.evaluation.centipawns
+                    if update.evaluation.centipawns is not None
+                    else 0,
+                ),
+                chess.WHITE,
+            ),
+            "pv": [chess.Move.from_uci(m) for m in update.variations[0].pv_uci]
+            if update.variations
+            else [],
+            "depth": update.depth_reached,
+        }
+        infos.append(info)
+        group = [info] if update.variations else []
+        multipv_groups.append(group)
+
+    stream = MagicMock()
+    stream.__enter__ = MagicMock(return_value=stream)
+    stream.__exit__ = MagicMock(return_value=False)
+    stream.__iter__ = MagicMock(return_value=iter(infos))
+
+    multipv_iter = iter(multipv_groups)
+    type(stream).multipv = property(lambda self: next(multipv_iter, []))
+
+    mock_engine.analysis.return_value = stream
+
+
+# ---------------------------------------------------------------------------
+# AC: Continuous analysis coaching (US2)
+# ---------------------------------------------------------------------------
+
+
+class TestContinuousCoach:
+    """submit_opponent_move_continuous() streams advice updates."""
+
+    def test_callback_receives_continuous_advice(self) -> None:
+        """AC1: Continuous analysis starts after opponent move."""
+        config = CoachConfig(player_color=PlayerColor.BLACK)
+        coach, mock_engine = _make_coach_with_mock(config)
+
+        board = chess.Board()
+        board.push_san("e4")
+        expected_fen = board.fen()
+
+        update = _make_continuous_update(expected_fen, "e5", -20, 10)
+        _setup_mock_continuous(mock_engine, [update])
+
+        advices: list[ContinuousAdvice] = []
+        done = threading.Event()
+
+        def on_advice(advice: ContinuousAdvice) -> None:
+            advices.append(advice)
+            done.set()
+
+        handle = coach.submit_opponent_move_continuous("e4", on_advice)
+        assert done.wait(timeout=_SYNC_TIMEOUT_S)
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert len(advices) >= 1
+        assert advices[0].opponent_move_san == "e4"
+        assert advices[0].current_fen == expected_fen
+        assert advices[0].update.depth_reached == 10
+
+    def test_stop_analysis_cancels(self) -> None:
+        """AC4: Analysis stops when stop_analysis() is called."""
+        config = CoachConfig(player_color=PlayerColor.BLACK)
+        coach, mock_engine = _make_coach_with_mock(config)
+
+        board = chess.Board()
+        board.push_san("e4")
+
+        update = _make_continuous_update(board.fen())
+
+        blocking = threading.Event()
+
+        def blocking_iter():
+            info: chess.engine.InfoDict = {
+                "score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                "pv": [],
+                "depth": 10,
+            }
+            yield info
+            blocking.wait(timeout=_SYNC_TIMEOUT_S)
+
+        stream = MagicMock()
+        stream.__enter__ = MagicMock(return_value=stream)
+        stream.__exit__ = MagicMock(return_value=False)
+        stream.__iter__ = MagicMock(side_effect=lambda: blocking_iter())
+        type(stream).multipv = property(
+            lambda self: [
+                {
+                    "score": chess.engine.PovScore(chess.engine.Cp(0), chess.WHITE),
+                    "pv": [],
+                    "depth": 10,
+                },
+            ],
+        )
+        mock_engine.analysis.return_value = stream
+
+        got_first = threading.Event()
+
+        def on_advice(advice: ContinuousAdvice) -> None:
+            got_first.set()
+
+        handle = coach.submit_opponent_move_continuous("e4", on_advice)
+        assert got_first.wait(timeout=_SYNC_TIMEOUT_S)
+
+        coach.stop_analysis()
+        blocking.set()
+        handle.wait(timeout=_SYNC_TIMEOUT_S)
+
+        assert not handle.is_running
+
+    def test_turn_enforcement(self) -> None:
+        """Cannot call submit_opponent_move_continuous on player turn."""
+        config = CoachConfig(player_color=PlayerColor.WHITE)
+        coach, _ = _make_coach_with_mock(config)
+
+        with pytest.raises(NotYourTurnError):
+            coach.submit_opponent_move_continuous("e4", lambda a: None)
+
+    def test_illegal_move_rejected(self) -> None:
+        """Illegal move raises IllegalMoveError."""
+        config = CoachConfig(player_color=PlayerColor.BLACK)
+        coach, _ = _make_coach_with_mock(config)
+
+        with pytest.raises(IllegalMoveError):
+            coach.submit_opponent_move_continuous("Zz9", lambda a: None)
+
+
+# ---------------------------------------------------------------------------
+# AC: Move history
+# ---------------------------------------------------------------------------
+
+
+class TestMoveHistory:
+    """move_history property tracks played moves in SAN."""
+
+    def test_empty_initially(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        assert coach.move_history == ()
+
+    def test_tracks_moves(self) -> None:
+        config = CoachConfig(player_color=PlayerColor.BLACK)
+        coach, mock_engine = _make_coach_with_mock(config)
+
+        board = chess.Board()
+        board.push_san("e4")
+        infos = _build_infos_for_position(board.fen(), ["e7e5"], [0])
+        mock_engine.analyse.return_value = infos
+
+        coach.submit_opponent_move("e4")
+        coach.submit_player_move("e5")
+
+        assert coach.move_history == ("e4", "e5")

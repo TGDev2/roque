@@ -26,7 +26,15 @@ from enum import Enum
 
 import chess
 
-from chesslab.analysis import AnalysisConfig, AnalysisResult, PositionAnalyser
+from typing import Callable
+
+from chesslab.analysis import (
+    AnalysisConfig,
+    AnalysisResult,
+    ContinuousAnalysisHandle,
+    ContinuousUpdate,
+    PositionAnalyser,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +110,31 @@ class MoveAdvice:
     move_number: int
 
 
+@dataclass(frozen=True)
+class ContinuousAdvice:
+    """Incremental advice update emitted during continuous analysis.
+
+    Attributes
+    ----------
+    opponent_move_san:
+        The opponent move that triggered this analysis (normalised SAN).
+    current_fen:
+        Board FEN after the opponent move.
+    update:
+        The latest continuous analysis update.
+    move_number:
+        Current full-move number.
+    """
+
+    opponent_move_san: str
+    current_fen: str
+    update: ContinuousUpdate
+    move_number: int
+
+
+AdviceUpdateCallback = Callable[[ContinuousAdvice], None]
+
+
 # ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
@@ -132,6 +165,7 @@ class GameCoach:
             if self._config.player_color == PlayerColor.WHITE
             else chess.WHITE
         )
+        self._current_handle: ContinuousAnalysisHandle | None = None
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -145,7 +179,8 @@ class GameCoach:
         )
 
     def stop(self) -> None:
-        """Stop the Stockfish engine."""
+        """Stop any running analysis and the Stockfish engine."""
+        self.stop_analysis()
         self._analyser.stop()
         logger.info("Game coach stopped.")
 
@@ -243,6 +278,75 @@ class GameCoach:
 
         logger.info("Player played: %s (FEN: %s)", normalised_san, self._board.fen())
 
+    def submit_opponent_move_continuous(
+        self,
+        move_san: str,
+        callback: AdviceUpdateCallback,
+    ) -> ContinuousAnalysisHandle:
+        """Register an opponent move and start continuous Stockfish analysis.
+
+        Like :meth:`submit_opponent_move` but starts a streaming analysis
+        that calls *callback* with a :class:`ContinuousAdvice` each time the
+        search depth increases.
+
+        Parameters
+        ----------
+        move_san:
+            The opponent's move in Standard Algebraic Notation.
+        callback:
+            Called from an analysis thread with each incremental update.
+
+        Returns
+        -------
+        ContinuousAnalysisHandle
+            A handle to stop or wait for the analysis.
+
+        Raises
+        ------
+        GameOverError
+            If the game is already over.
+        NotYourTurnError
+            If it is currently the player's turn, not the opponent's.
+        IllegalMoveError
+            If *move_san* is not a legal move in the current position.
+        """
+        self._check_game_not_over()
+
+        if self._board.turn != self._opponent_chess_color:
+            raise NotYourTurnError(
+                "It is not the opponent's turn. "
+                f"Expected {self._config.player_color.value} (player) move.",
+            )
+
+        move = self._parse_san(move_san)
+        normalised_san = self._board.san(move)
+        self._board.push(move)
+
+        current_fen = self._board.fen()
+        move_number = self._board.fullmove_number
+        logger.info("Opponent played: %s (FEN: %s)", normalised_san, current_fen)
+
+        # Stop any previous continuous analysis.
+        self.stop_analysis()
+
+        def _wrapped_callback(update: ContinuousUpdate) -> None:
+            callback(ContinuousAdvice(
+                opponent_move_san=normalised_san,
+                current_fen=current_fen,
+                update=update,
+                move_number=move_number,
+            ))
+
+        handle = self._analyser.analyse_continuous(current_fen, _wrapped_callback)
+        self._current_handle = handle
+        return handle
+
+    def stop_analysis(self) -> None:
+        """Stop any running continuous analysis."""
+        if self._current_handle is not None and self._current_handle.is_running:
+            self._current_handle.stop()
+            self._current_handle = None
+
     # -- Properties ----------------------------------------------------------
 
     @property
@@ -264,6 +368,16 @@ class GameCoach:
     def is_player_turn(self) -> bool:
         """``True`` if it is currently the player's turn to move."""
         return self._board.turn != self._opponent_chess_color
+
+    @property
+    def move_history(self) -> tuple[str, ...]:
+        """SAN moves played so far, in order."""
+        replay = chess.Board()
+        san_list: list[str] = []
+        for move in self._board.move_stack:
+            san_list.append(replay.san(move))
+            replay.push(move)
+        return tuple(san_list)
 
     # -- Private helpers -----------------------------------------------------
 
