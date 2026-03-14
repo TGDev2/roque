@@ -252,8 +252,42 @@ class TestEngineLifecycle:
             side_effect=FileNotFoundError("stockfish not found"),
         ):
             analyser = PositionAnalyser()
-            with pytest.raises(EngineNotFoundError, match="Cannot start Stockfish"):
+            with pytest.raises(
+                EngineNotFoundError,
+                match="Cannot start Stockfish.*CHESSLAB_STOCKFISH_PATH",
+            ):
                 analyser.start()
+
+    def test_start_uses_stockfish_path_from_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CHESSLAB_STOCKFISH_PATH": "/tmp/stockfish-custom"},
+            clear=False,
+        ):
+            with patch(
+                "chesslab.analysis.position_analyser.chess.engine.SimpleEngine.popen_uci",
+                return_value=MagicMock(spec=chess.engine.SimpleEngine),
+            ) as popen:
+                analyser = PositionAnalyser()
+                analyser.start()
+                popen.assert_called_once_with("/tmp/stockfish-custom")
+                analyser.stop()
+
+    def test_explicit_stockfish_path_not_overridden_by_env(self) -> None:
+        config = AnalysisConfig(stockfish_path="/opt/chess/stockfish")
+        with patch.dict(
+            os.environ,
+            {"CHESSLAB_STOCKFISH_PATH": "/tmp/stockfish-custom"},
+            clear=False,
+        ):
+            with patch(
+                "chesslab.analysis.position_analyser.chess.engine.SimpleEngine.popen_uci",
+                return_value=MagicMock(spec=chess.engine.SimpleEngine),
+            ) as popen:
+                analyser = PositionAnalyser(config)
+                analyser.start()
+                popen.assert_called_once_with("/opt/chess/stockfish")
+                analyser.stop()
 
     def test_analyse_when_stopped(self) -> None:
         analyser = PositionAnalyser()

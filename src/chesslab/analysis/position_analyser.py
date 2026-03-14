@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -37,6 +38,13 @@ import chess.engine
 logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = Path.home() / ".chesslab"
+_STOCKFISH_ENV_VAR = "CHESSLAB_STOCKFISH_PATH"
+_STOCKFISH_FALLBACK_CANDIDATES: tuple[str, ...] = (
+    "/usr/games/stockfish",
+    "/usr/local/bin/stockfish",
+    "/usr/bin/stockfish",
+    "/opt/homebrew/bin/stockfish",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +77,7 @@ class AnalysisConfig:
     ----------
     stockfish_path:
         Filesystem path to the Stockfish binary.  Defaults to ``"stockfish"``
-        (relies on PATH resolution).
+        (resolved from ``CHESSLAB_STOCKFISH_PATH`` first, then ``PATH``).
     depth:
         Maximum search depth.  Default 18.
     time_limit:
@@ -425,20 +433,22 @@ class PositionAnalyser:
             return
 
         threads = self._resolve_threads()
+        engine_command = self._resolve_stockfish_command()
         logger.info(
-            "Starting Stockfish: path=%s threads=%d hash=%dMB",
+            "Starting Stockfish: path=%s resolved=%s threads=%d hash=%dMB",
             self._config.stockfish_path,
+            engine_command,
             threads,
             self._config.hash_mb,
         )
 
         try:
             self._engine = chess.engine.SimpleEngine.popen_uci(
-                self._config.stockfish_path,
+                engine_command,
             )
         except (FileNotFoundError, chess.engine.EngineTerminatedError) as exc:
             raise EngineNotFoundError(
-                f"Cannot start Stockfish at '{self._config.stockfish_path}': {exc}",
+                self._format_engine_not_found_error(engine_command, exc),
             ) from exc
 
         self._engine.configure({"Threads": threads, "Hash": self._config.hash_mb})
@@ -743,6 +753,45 @@ class PositionAnalyser:
             return self._config.threads
         cpu_count = os.cpu_count() or 1
         return max(1, cpu_count - 1)
+
+    def _resolve_stockfish_command(self) -> str:
+        """Resolve the Stockfish command from config, env, PATH, and fallbacks."""
+        configured_path = str(Path(self._config.stockfish_path).expanduser())
+        if self._config.stockfish_path != "stockfish":
+            return configured_path
+
+        env_path = os.environ.get(_STOCKFISH_ENV_VAR)
+        if env_path:
+            return str(Path(env_path).expanduser())
+
+        path_match = shutil.which("stockfish")
+        if path_match:
+            return path_match
+
+        for candidate in _STOCKFISH_FALLBACK_CANDIDATES:
+            if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+                return candidate
+
+        return configured_path
+
+    def _format_engine_not_found_error(
+        self,
+        resolved_path: str,
+        exc: Exception,
+    ) -> str:
+        """Build a user-actionable error message when Stockfish cannot start."""
+        configured_path = self._config.stockfish_path
+        location = f"'{configured_path}'"
+        if resolved_path != configured_path:
+            location += f" (resolved to '{resolved_path}')"
+
+        message = f"Cannot start Stockfish at {location}: {exc}."
+        if configured_path == "stockfish":
+            return (
+                f"{message} Install Stockfish (Ubuntu: sudo apt install stockfish), "
+                f"or set {_STOCKFISH_ENV_VAR} to the engine binary path."
+            )
+        return f"{message} Verify that the configured path points to an executable binary."
 
     @staticmethod
     def _to_evaluation(pov_score: chess.engine.PovScore) -> Evaluation:
