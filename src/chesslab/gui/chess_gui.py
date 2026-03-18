@@ -42,16 +42,89 @@ from chesslab.gui.panels import EvalPanel, MoveHistoryPanel, SuggestionsPanel
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Colour palette — modern dark theme
 # ---------------------------------------------------------------------------
 
-_BG = "#1e1e1e"
-_FG = "#e0e0e0"
-_FG_DIM = "#888888"
-_ACCENT = "#4fc3f7"
+_BG = "#16161e"
+_BG_SECONDARY = "#1e1e2e"
+_CARD_BORDER = "#2a2a3c"
+_FG = "#e0e0e8"
+_FG_DIM = "#7a7a8c"
+_FG_MUTED = "#555566"
+_ACCENT = "#64b5f6"
+_ACCENT_HOVER = "#90caf9"
+_ACCENT_DARK = "#3d7ab8"
 _ERROR = "#ef5350"
+_SUCCESS = "#66bb6a"
+
+# Button colours.
+_BTN_BG = "#2a2a3c"
+_BTN_FG = "#e0e0e8"
+_BTN_HOVER = "#3a3a4c"
+_BTN_ACTIVE = "#4a4a5c"
+_BTN_ACCENT_BG = "#2962ff"
+_BTN_ACCENT_FG = "#ffffff"
+_BTN_ACCENT_HOVER = "#448aff"
+_BTN_WHITE_BG = "#e8e0d4"
+_BTN_WHITE_FG = "#1a1a1a"
+_BTN_WHITE_HOVER = "#f0e8dc"
+_BTN_BLACK_BG = "#2a2a3c"
+_BTN_BLACK_FG = "#e0e0e8"
+_BTN_BLACK_HOVER = "#3a3a4c"
+
+# Entry field.
+_ENTRY_BG = "#1a1a2e"
+_ENTRY_FG = "#e0e0e8"
+_ENTRY_BORDER = "#3a3a4c"
+_ENTRY_FOCUS_BORDER = "#64b5f6"
+
+# Status bar.
+_STATUS_BG = "#12121a"
 
 _POLL_INTERVAL_MS = 100
+
+
+# ---------------------------------------------------------------------------
+# Styled button helper
+# ---------------------------------------------------------------------------
+
+
+def _styled_button(
+    parent: tk.Widget,
+    text: str,
+    command: object,
+    *,
+    bg: str = _BTN_BG,
+    fg: str = _BTN_FG,
+    hover_bg: str = _BTN_HOVER,
+    active_bg: str = _BTN_ACTIVE,
+    font: tuple[str, ...] = ("sans-serif", 10),
+    padx: int = 12,
+    pady: int = 6,
+    cursor: str = "hand2",
+    **kwargs: object,
+) -> tk.Button:
+    """Create a flat-styled button with hover effect."""
+    btn = tk.Button(
+        parent,
+        text=text,
+        command=command,
+        font=font,
+        bg=bg,
+        fg=fg,
+        activebackground=active_bg,
+        activeforeground=fg,
+        relief="flat",
+        bd=0,
+        padx=padx,
+        pady=pady,
+        cursor=cursor,
+        highlightthickness=0,
+        **kwargs,  # type: ignore[arg-type]
+    )
+    btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
+    btn.bind("<Leave>", lambda e: btn.config(bg=bg))
+    return btn
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +171,9 @@ class ChessGui:
         self._current_handle: ContinuousAnalysisHandle | None = None
         self._update_queue: queue.Queue[ContinuousAdvice] = queue.Queue()
 
+        # Current best move from analysis (UCI string, e.g. "e2e4").
+        self._best_move_uci: str | None = None
+
         # Widgets (populated by _build_window).
         self._board_widget: BoardWidget | None = None
         self._eval_panel: EvalPanel | None = None
@@ -105,6 +181,7 @@ class ChessGui:
         self._history_panel: MoveHistoryPanel | None = None
         self._move_entry: tk.Entry | None = None
         self._status_label: tk.Label | None = None
+        self._status_icon: tk.Label | None = None
 
     def run(self) -> None:
         """Build the window and enter the tkinter mainloop (blocking)."""
@@ -172,70 +249,117 @@ class ChessGui:
         elo_var = tk.IntVar(value=initial_elo)
 
         dialog = tk.Toplevel(parent)
-        dialog.title("ChessLab — Color & Elo")
+        dialog.title("ChessLab")
         dialog.configure(bg=_BG)
         dialog.transient(parent)
         dialog.grab_set()
         dialog.resizable(False, False)
 
+        # Main container with padding.
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=24, pady=20)
+
+        # Title.
         tk.Label(
-            dialog, text="Choose your color", bg=_BG, fg=_FG,
-            font=("sans-serif", 14, "bold"), padx=20, pady=10,
-        ).pack()
+            container, text="New Game", bg=_BG, fg=_FG,
+            font=("sans-serif", 18, "bold"),
+        ).pack(pady=(0, 16))
 
-        elo_frame = tk.Frame(dialog, bg=_BG)
-        elo_frame.pack(fill="x", padx=20, pady=(0, 8))
+        # Elo section — card style.
+        elo_card = tk.Frame(container, bg=_CARD_BORDER)
+        elo_card.pack(fill="x", pady=(0, 16))
+        elo_inner = tk.Frame(elo_card, bg=_BG_SECONDARY)
+        elo_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        elo_header = tk.Frame(elo_inner, bg=_BG_SECONDARY)
+        elo_header.pack(fill="x", padx=12, pady=(10, 0))
 
         tk.Label(
-            elo_frame,
-            text="Stockfish Elo",
-            bg=_BG,
-            fg=_FG,
-            font=("sans-serif", 10, "bold"),
-            anchor="w",
-        ).pack(fill="x")
+            elo_header, text="Engine Strength", bg=_BG_SECONDARY, fg=_FG,
+            font=("sans-serif", 11, "bold"), anchor="w",
+        ).pack(side="left")
 
-        tk.Scale(
-            elo_frame,
+        elo_value_label = tk.Label(
+            elo_header, text=str(initial_elo), bg=_BG_SECONDARY, fg=_ACCENT,
+            font=("monospace", 14, "bold"), anchor="e",
+        )
+        elo_value_label.pack(side="right")
+
+        def _on_elo_change(*_args: object) -> None:
+            elo_value_label.config(text=str(elo_var.get()))
+
+        elo_var.trace_add("write", _on_elo_change)
+
+        scale = tk.Scale(
+            elo_inner,
             from_=AnalysisConfig.MIN_ENGINE_ELO,
             to=AnalysisConfig.MAX_ENGINE_ELO,
             orient="horizontal",
             resolution=10,
             variable=elo_var,
-            bg=_BG,
-            fg=_FG,
-            troughcolor="#2f2f2f",
-            highlightthickness=0,
-            length=280,
-        ).pack(fill="x")
-
-        tk.Label(
-            elo_frame,
-            textvariable=elo_var,
-            bg=_BG,
+            bg=_BG_SECONDARY,
             fg=_FG_DIM,
-            font=("monospace", 10),
-            anchor="e",
-        ).pack(fill="x")
+            troughcolor="#2a2a3c",
+            highlightthickness=0,
+            length=300,
+            showvalue=False,
+            sliderrelief="flat",
+            bd=0,
+        )
+        scale.pack(fill="x", padx=12, pady=(4, 4))
 
-        btn_frame = tk.Frame(dialog, bg=_BG)
-        btn_frame.pack(pady=10, padx=20)
+        # Elo range labels.
+        range_frame = tk.Frame(elo_inner, bg=_BG_SECONDARY)
+        range_frame.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(
+            range_frame, text=str(AnalysisConfig.MIN_ENGINE_ELO),
+            bg=_BG_SECONDARY, fg=_FG_MUTED, font=("monospace", 8),
+        ).pack(side="left")
+        tk.Label(
+            range_frame, text=str(AnalysisConfig.MAX_ENGINE_ELO),
+            bg=_BG_SECONDARY, fg=_FG_MUTED, font=("monospace", 8),
+        ).pack(side="right")
+
+        # Color choice section.
+        tk.Label(
+            container, text="Play as", bg=_BG, fg=_FG_DIM,
+            font=("sans-serif", 10), anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+
+        btn_frame = tk.Frame(container, bg=_BG)
+        btn_frame.pack(fill="x")
 
         def choose(color: PlayerColor) -> None:
             result[0] = (color, int(elo_var.get()))
             dialog.destroy()
 
-        tk.Button(
-            btn_frame, text="\u2654  Play as White", font=("sans-serif", 12),
+        # White button.
+        white_btn = _styled_button(
+            btn_frame,
+            text="\u2654  White",
             command=lambda: choose(PlayerColor.WHITE),
-            width=16, pady=8,
-        ).pack(side="left", padx=8)
+            bg=_BTN_WHITE_BG,
+            fg=_BTN_WHITE_FG,
+            hover_bg=_BTN_WHITE_HOVER,
+            active_bg="#f5ede1",
+            font=("sans-serif", 13, "bold"),
+            pady=12,
+        )
+        white_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
-        tk.Button(
-            btn_frame, text="\u265a  Play as Black", font=("sans-serif", 12),
+        # Black button.
+        black_btn = _styled_button(
+            btn_frame,
+            text="\u265a  Black",
             command=lambda: choose(PlayerColor.BLACK),
-            width=16, pady=8,
-        ).pack(side="left", padx=8)
+            bg=_BTN_BLACK_BG,
+            fg=_BTN_BLACK_FG,
+            hover_bg=_BTN_BLACK_HOVER,
+            active_bg="#4a4a5c",
+            font=("sans-serif", 13, "bold"),
+            pady=12,
+        )
+        black_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         # Center dialog.
         dialog.update_idletasks()
@@ -254,11 +378,14 @@ class ChessGui:
 
         # Main content frame.
         main_frame = tk.Frame(root, bg=_BG)
-        main_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        main_frame.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
-        # Left: board.
-        board_frame = tk.Frame(main_frame, bg=_BG)
-        board_frame.pack(side="left", padx=(0, 8))
+        # Left: board with subtle shadow frame.
+        board_outer = tk.Frame(main_frame, bg="#0a0a12", bd=0)
+        board_outer.pack(side="left", padx=(0, 8))
+
+        board_frame = tk.Frame(board_outer, bg=_BG)
+        board_frame.pack(padx=2, pady=2)
 
         self._board_widget = BoardWidget(
             board_frame,
@@ -269,47 +396,118 @@ class ChessGui:
         self._board_widget.pack()
 
         # Right: panels.
-        panel_frame = tk.Frame(main_frame, bg=_BG, width=280)
+        panel_frame = tk.Frame(main_frame, bg=_BG, width=290)
         panel_frame.pack(side="left", fill="both", expand=True)
         panel_frame.pack_propagate(False)
 
-        self._eval_panel = EvalPanel(panel_frame, bar_height=140)
-        self._eval_panel.pack(fill="x", pady=(0, 4))
+        self._eval_panel = EvalPanel(panel_frame, bar_height=160)
+        self._eval_panel.pack(fill="x", pady=(0, 6))
 
         self._suggestions_panel = SuggestionsPanel(panel_frame)
-        self._suggestions_panel.pack(fill="x", pady=(0, 4))
+        self._suggestions_panel.pack(fill="x", pady=(0, 6))
 
         self._history_panel = MoveHistoryPanel(panel_frame)
-        self._history_panel.pack(fill="both", expand=True, pady=(0, 4))
+        self._history_panel.pack(fill="both", expand=True, pady=(0, 6))
+
+        # Action buttons row.
+        btn_frame = tk.Frame(panel_frame, bg=_BG)
+        btn_frame.pack(fill="x", pady=(0, 4))
+
+        apply_btn = _styled_button(
+            btn_frame,
+            text="\u25b6  Apply suggestion",
+            command=self._on_apply_suggestion,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 10, "bold"),
+        )
+        apply_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+
+        undo_btn = _styled_button(
+            btn_frame,
+            text="\u21a9  Undo",
+            command=self._on_undo,
+        )
+        undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         # New game button.
-        tk.Button(
-            panel_frame, text="New Game", font=("sans-serif", 10),
+        new_game_btn = _styled_button(
+            panel_frame,
+            text="New Game",
             command=self._on_new_game,
-        ).pack(fill="x", padx=6, pady=(0, 4))
+            font=("sans-serif", 10),
+        )
+        new_game_btn.pack(fill="x", pady=(0, 4))
 
-        # Bottom: move entry + status.
-        bottom_frame = tk.Frame(root, bg=_BG)
-        bottom_frame.pack(fill="x", padx=4, pady=(0, 4))
+        # Bottom status bar.
+        status_bar = tk.Frame(root, bg=_STATUS_BG, height=40)
+        status_bar.pack(fill="x", padx=0, pady=0)
+        status_bar.pack_propagate(False)
+
+        inner_status = tk.Frame(status_bar, bg=_STATUS_BG)
+        inner_status.pack(fill="both", expand=True, padx=8)
+
+        # Move entry area.
+        entry_frame = tk.Frame(inner_status, bg=_STATUS_BG)
+        entry_frame.pack(side="left", fill="y", pady=4)
 
         tk.Label(
-            bottom_frame, text="Move (SAN):", bg=_BG, fg=_FG,
-            font=("sans-serif", 10),
-        ).pack(side="left", padx=(0, 4))
+            entry_frame, text="Move", bg=_STATUS_BG, fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left", padx=(0, 6))
+
+        entry_border = tk.Frame(entry_frame, bg=_ENTRY_BORDER)
+        entry_border.pack(side="left")
 
         self._move_entry = tk.Entry(
-            bottom_frame, font=("monospace", 12), width=12,
+            entry_border,
+            font=("monospace", 12),
+            width=8,
+            bg=_ENTRY_BG,
+            fg=_ENTRY_FG,
+            insertbackground=_ACCENT,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
         )
-        self._move_entry.pack(side="left", padx=(0, 4))
+        self._move_entry.pack(padx=1, pady=1, ipady=2)
         self._move_entry.bind("<Return>", self._on_entry_submit)
 
-        tk.Button(
-            bottom_frame, text="Submit", font=("sans-serif", 10),
+        # Focus effects.
+        self._move_entry.bind(
+            "<FocusIn>",
+            lambda e: entry_border.config(bg=_ENTRY_FOCUS_BORDER),
+        )
+        self._move_entry.bind(
+            "<FocusOut>",
+            lambda e: entry_border.config(bg=_ENTRY_BORDER),
+        )
+
+        submit_btn = _styled_button(
+            entry_frame,
+            text="Submit",
             command=self._on_entry_submit,
-        ).pack(side="left", padx=(0, 8))
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 9, "bold"),
+            padx=10,
+            pady=3,
+        )
+        submit_btn.pack(side="left", padx=(6, 0))
+
+        # Status text.
+        self._status_icon = tk.Label(
+            inner_status, text="\u25cf", bg=_STATUS_BG, fg=_SUCCESS,
+            font=("sans-serif", 10),
+        )
+        self._status_icon.pack(side="left", padx=(16, 4))
 
         self._status_label = tk.Label(
-            bottom_frame, text="", bg=_BG, fg=_FG_DIM,
+            inner_status, text="", bg=_STATUS_BG, fg=_FG_DIM,
             font=("sans-serif", 10), anchor="w",
         )
         self._status_label.pack(side="left", fill="x", expand=True)
@@ -341,6 +539,57 @@ class ChessGui:
             return
         self._move_entry.delete(0, "end")
         self._submit_san(san)
+
+    def _on_apply_suggestion(self) -> None:
+        """Apply the current best move suggestion to the board."""
+        assert self._coach is not None
+
+        if self._best_move_uci is None:
+            self._set_status("No suggestion available", error=True)
+            return
+
+        if not self._coach.is_player_turn:
+            self._set_status("Not your turn", error=True)
+            return
+
+        uci_str = self._best_move_uci
+        try:
+            move = chess.Move.from_uci(uci_str)
+            board = chess.Board(self._coach.current_fen)
+            san = board.san(move)
+        except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
+            self._set_status(f"Suggestion invalid: {uci_str}", error=True)
+            return
+
+        self._best_move_uci = None
+        self._submit_san(san)
+
+    def _on_undo(self) -> None:
+        """Undo the last move."""
+        assert self._coach is not None
+
+        san = self._coach.undo_move()
+        if san is None:
+            self._set_status("Nothing to undo", error=True)
+            return
+
+        self._best_move_uci = None
+        self._current_handle = None
+
+        assert self._board_widget is not None
+        assert self._history_panel is not None
+        assert self._eval_panel is not None
+        assert self._suggestions_panel is not None
+
+        self._board_widget.set_position(self._coach.current_fen)
+        self._board_widget.clear_last_move()
+        self._board_widget.clear_highlights()
+        self._history_panel.set_history(self._coach.move_history)
+        self._eval_panel.update_eval(None, 0, is_loading=False)
+        self._suggestions_panel.update_suggestions(())
+
+        self._update_turn_status()
+        logger.info("Undo: %s", san)
 
     def _submit_san(self, san: str) -> None:
         """Submit a SAN move, routing to opponent or player method."""
@@ -383,7 +632,19 @@ class ChessGui:
         assert self._history_panel is not None
 
         self._board_widget.set_position(self._coach.current_fen)
-        self._history_panel.set_history(self._coach.move_history)
+
+        # Highlight last move.
+        history = self._coach.move_history
+        if history:
+            board = chess.Board()
+            for san_move in history:
+                move = board.parse_san(san_move)
+                from_sq = chess.square_name(move.from_square)
+                to_sq = chess.square_name(move.to_square)
+                board.push(move)
+            self._board_widget.set_last_move(from_sq, to_sq)
+
+        self._history_panel.set_history(history)
         self._update_turn_status()
 
     # -- Queue polling -------------------------------------------------------
@@ -412,11 +673,13 @@ class ChessGui:
         if self._suggestions_panel is not None:
             self._suggestions_panel.update_suggestions(update.variations)
 
-        if self._board_widget is not None and update.best_move_uci:
-            # Highlight best move source and destination.
-            from_sq = update.best_move_uci[:2]
-            to_sq = update.best_move_uci[2:4]
-            self._board_widget.highlight_squares([from_sq, to_sq])
+        if update.best_move_uci:
+            self._best_move_uci = update.best_move_uci
+            if self._board_widget is not None:
+                # Show arrow from source to destination.
+                from_sq = update.best_move_uci[:2]
+                to_sq = update.best_move_uci[2:4]
+                self._board_widget.highlight_squares([from_sq, to_sq])
 
     # -- Status management ---------------------------------------------------
 
@@ -428,23 +691,44 @@ class ChessGui:
             outcome = chess.Board(self._coach.current_fen).outcome()
             if outcome and outcome.winner is not None:
                 winner = "White" if outcome.winner else "Black"
-                self._set_status(f"Game over — {winner} wins!")
+                self._set_status(f"Game over \u2014 {winner} wins!", game_over=True)
             else:
-                self._set_status("Game over — Draw!")
+                self._set_status("Game over \u2014 Draw!", game_over=True)
             return
 
         if self._coach.is_player_turn:
-            self._set_status("Your turn — click the board or type a move")
+            self._set_status("Your turn \u2014 click the board or type a move")
         else:
-            self._set_status("Opponent's turn — enter their move")
+            self._set_status("Opponent's turn \u2014 enter their move", waiting=True)
 
-    def _set_status(self, text: str, error: bool = False) -> None:
+    def _set_status(
+        self,
+        text: str,
+        error: bool = False,
+        waiting: bool = False,
+        game_over: bool = False,
+    ) -> None:
         """Update the status label."""
         if self._status_label is not None:
-            self._status_label.config(
-                text=text,
-                fg=_ERROR if error else _FG_DIM,
-            )
+            if error:
+                fg = _ERROR
+            elif waiting:
+                fg = _FG_MUTED
+            elif game_over:
+                fg = _ACCENT
+            else:
+                fg = _FG_DIM
+            self._status_label.config(text=text, fg=fg)
+
+        if self._status_icon is not None:
+            if error:
+                self._status_icon.config(text="\u25cf", fg=_ERROR)
+            elif waiting:
+                self._status_icon.config(text="\u25cb", fg=_FG_MUTED)
+            elif game_over:
+                self._status_icon.config(text="\u2605", fg=_ACCENT)
+            else:
+                self._status_icon.config(text="\u25cf", fg=_SUCCESS)
 
     # -- New game / close ----------------------------------------------------
 
@@ -461,6 +745,7 @@ class ChessGui:
                 break
 
         self._current_handle = None
+        self._best_move_uci = None
 
         assert self._root is not None
         player_color, self._engine_elo = self._show_color_dialog(
@@ -471,6 +756,8 @@ class ChessGui:
 
         assert self._board_widget is not None
         self._board_widget.set_flipped(player_color == PlayerColor.BLACK)
+        self._board_widget.clear_last_move()
+        self._board_widget.clear_highlights()
         self._board_widget.set_position(self._coach.current_fen)
 
         assert self._eval_panel is not None

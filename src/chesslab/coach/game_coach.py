@@ -341,6 +341,29 @@ class GameCoach:
         self._current_handle = handle
         return handle
 
+    def undo_move(self) -> str | None:
+        """Undo the last move on the board.
+
+        Stops any running analysis and pops the most recent move.
+
+        Returns
+        -------
+        str or None
+            The SAN of the undone move, or ``None`` if no moves to undo.
+        """
+        self.stop_analysis()
+
+        if not self._board.move_stack:
+            return None
+
+        # Recover SAN before popping.
+        move = self._board.peek()
+        self._board.pop()
+        # Replay to get SAN of the undone move.
+        san = self._board.san(move)
+        logger.info("Undo move: %s (FEN: %s)", san, self._board.fen())
+        return san
+
     def stop_analysis(self) -> None:
         """Stop any running continuous analysis."""
         if self._current_handle is not None and self._current_handle.is_running:

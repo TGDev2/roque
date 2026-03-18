@@ -36,12 +36,31 @@ UNICODE_PIECES: dict[str, str] = {
     "p": "\u265f",
 }
 
-_LIGHT_SQUARE = "#f0d9b5"
-_DARK_SQUARE = "#b58863"
-_SELECTED_COLOUR = "#f6f669"
-_LEGAL_DEST_COLOUR = "#829769"
-_PROMOTION_BG = "#2b2b2b"
-_PROMOTION_FG = "#f0f0f0"
+# Board colours — warm, modern palette.
+_LIGHT_SQUARE = "#ecd8b8"
+_DARK_SQUARE = "#ae8a68"
+_SELECTED_COLOUR = "#f7ec5d"
+_SELECTED_DARK = "#d6cc3a"
+_LEGAL_DOT_COLOUR = "#4a4a4a"
+_LEGAL_CAPTURE_COLOUR = "#e05555"
+_LAST_MOVE_LIGHT = "#cdd26a"
+_LAST_MOVE_DARK = "#a9a238"
+_HIGHLIGHT_ARROW = "#3b82f6"
+_CHECK_COLOUR = "#e74c3c"
+
+_PROMOTION_BG = "#1a1a2e"
+_PROMOTION_FG = "#e8e8e8"
+_PROMOTION_BTN_BG = "#2d2d44"
+_PROMOTION_BTN_HOVER = "#3d3d5c"
+
+# Piece colours.
+_WHITE_PIECE_FILL = "#ffffff"
+_WHITE_PIECE_OUTLINE = "#222222"
+_BLACK_PIECE_FILL = "#1a1a1a"
+_BLACK_PIECE_OUTLINE = "#1a1a1a"
+
+_COORD_LIGHT_FG = "#a07850"
+_COORD_DARK_FG = "#d4bc98"
 
 MoveCallback = Callable[[str, str], None]
 
@@ -143,6 +162,8 @@ class BoardWidget(tk.Canvas):
             width=size,
             height=size,
             highlightthickness=0,
+            bd=0,
+            relief="flat",
         )
         self._square_size = square_size
         self._flipped = flipped
@@ -150,6 +171,8 @@ class BoardWidget(tk.Canvas):
 
         self._board = chess.Board()
         self._selected_square: str | None = None
+        self._last_move: tuple[str, str] | None = None
+        self._highlighted_squares: list[str] = []
 
         self.bind("<Button-1>", self._on_click)
         self._draw()
@@ -168,18 +191,24 @@ class BoardWidget(tk.Canvas):
         self._selected_square = None
         self._draw()
 
-    def highlight_squares(self, squares: list[str]) -> None:
-        """Highlight a list of squares (e.g. for best move)."""
+    def set_last_move(self, from_sq: str, to_sq: str) -> None:
+        """Set and highlight the last move played."""
+        self._last_move = (from_sq, to_sq)
         self._draw()
-        for sq in squares:
-            x, y = square_to_coords(sq, self._square_size, self._flipped)
-            self.create_rectangle(
-                x, y, x + self._square_size, y + self._square_size,
-                outline="#ff0000", width=3,
-            )
+
+    def clear_last_move(self) -> None:
+        """Clear last move highlight."""
+        self._last_move = None
+        self._draw()
+
+    def highlight_squares(self, squares: list[str]) -> None:
+        """Highlight a list of squares (e.g. for best move arrow)."""
+        self._highlighted_squares = squares
+        self._draw()
 
     def clear_highlights(self) -> None:
         """Redraw the board without extra highlights."""
+        self._highlighted_squares = []
         self._draw()
 
     # -- Drawing -------------------------------------------------------------
@@ -190,24 +219,42 @@ class BoardWidget(tk.Canvas):
         sz = self._square_size
         placement = parse_fen_placement(self._board.board_fen())
 
+        # Compute legal destinations for selected piece.
         legal_dests: set[str] = set()
+        legal_captures: set[str] = set()
         if self._selected_square is not None:
             sq_obj = chess.parse_square(self._selected_square)
             for move in self._board.legal_moves:
                 if move.from_square == sq_obj:
-                    legal_dests.add(chess.square_name(move.to_square))
+                    dest_name = chess.square_name(move.to_square)
+                    legal_dests.add(dest_name)
+                    if self._board.piece_at(move.to_square) is not None:
+                        legal_captures.add(dest_name)
 
+        # Compute last-move squares.
+        last_move_sqs: set[str] = set()
+        if self._last_move:
+            last_move_sqs = {self._last_move[0], self._last_move[1]}
+
+        # Check detection.
+        check_square: str | None = None
+        if self._board.is_check():
+            king_sq = self._board.king(self._board.turn)
+            if king_sq is not None:
+                check_square = chess.square_name(king_sq)
+
+        # Draw squares.
         for rank in range(8):
             for file in range(8):
                 sq_name = f"{chr(ord('a') + file)}{rank + 1}"
                 x, y = square_to_coords(sq_name, sz, self._flipped)
-
-                # Square colour.
                 is_light = (file + rank) % 2 != 0
+
+                # Base square colour.
                 if sq_name == self._selected_square:
-                    colour = _SELECTED_COLOUR
-                elif sq_name in legal_dests:
-                    colour = _LEGAL_DEST_COLOUR
+                    colour = _SELECTED_COLOUR if is_light else _SELECTED_DARK
+                elif sq_name in last_move_sqs:
+                    colour = _LAST_MOVE_LIGHT if is_light else _LAST_MOVE_DARK
                 elif is_light:
                     colour = _LIGHT_SQUARE
                 else:
@@ -218,42 +265,113 @@ class BoardWidget(tk.Canvas):
                     fill=colour, outline="",
                 )
 
-                # Piece.
-                fen_char = placement.get(sq_name)
-                if fen_char and fen_char in UNICODE_PIECES:
-                    self.create_text(
-                        x + sz // 2, y + sz // 2,
-                        text=UNICODE_PIECES[fen_char],
-                        font=("sans-serif", int(sz * 0.55), "bold"),
-                        fill="#1a1a1a" if fen_char.isupper() else "#1a1a1a",
+                # Check indicator (red glow behind king).
+                if sq_name == check_square:
+                    margin = sz // 8
+                    self.create_rectangle(
+                        x + margin, y + margin,
+                        x + sz - margin, y + sz - margin,
+                        fill=_CHECK_COLOUR, outline="", stipple="gray50",
                     )
 
+        # Draw legal move indicators (dots and capture rings).
+        for sq_name in legal_dests:
+            x, y = square_to_coords(sq_name, sz, self._flipped)
+            cx, cy = x + sz // 2, y + sz // 2
+            if sq_name in legal_captures:
+                # Ring around capturable piece.
+                r = int(sz * 0.46)
+                self.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    outline=_LEGAL_CAPTURE_COLOUR, width=3,
+                )
+            else:
+                # Small dot for empty legal destination.
+                r = int(sz * 0.14)
+                self.create_oval(
+                    cx - r, cy - r, cx + r, cy + r,
+                    fill=_LEGAL_DOT_COLOUR, outline="",
+                    stipple="gray50",
+                )
+
+        # Draw pieces.
+        for rank in range(8):
+            for file in range(8):
+                sq_name = f"{chr(ord('a') + file)}{rank + 1}"
+                fen_char = placement.get(sq_name)
+                if not fen_char or fen_char not in UNICODE_PIECES:
+                    continue
+                x, y = square_to_coords(sq_name, sz, self._flipped)
+                cx, cy = x + sz // 2, y + sz // 2
+                is_white_piece = fen_char.isupper()
+
+                # Draw piece with proper contrast.
+                font_size = int(sz * 0.58)
+                if is_white_piece:
+                    # White piece: white fill with dark outline for contrast.
+                    # Draw outline by rendering text offset in 4 directions.
+                    for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                        self.create_text(
+                            cx + dx, cy + dy,
+                            text=UNICODE_PIECES[fen_char],
+                            font=("sans-serif", font_size, "bold"),
+                            fill=_WHITE_PIECE_OUTLINE,
+                        )
+                    self.create_text(
+                        cx, cy,
+                        text=UNICODE_PIECES[fen_char],
+                        font=("sans-serif", font_size, "bold"),
+                        fill=_WHITE_PIECE_FILL,
+                    )
+                else:
+                    # Black piece: solid dark.
+                    self.create_text(
+                        cx, cy,
+                        text=UNICODE_PIECES[fen_char],
+                        font=("sans-serif", font_size, "bold"),
+                        fill=_BLACK_PIECE_FILL,
+                    )
+
+        # Draw best-move arrow highlight.
+        if len(self._highlighted_squares) >= 2:
+            from_sq = self._highlighted_squares[0]
+            to_sq = self._highlighted_squares[1]
+            fx, fy = square_to_coords(from_sq, sz, self._flipped)
+            tx, ty = square_to_coords(to_sq, sz, self._flipped)
+            half = sz // 2
+            self.create_line(
+                fx + half, fy + half, tx + half, ty + half,
+                fill=_HIGHLIGHT_ARROW, width=max(3, sz // 12),
+                arrow="last", arrowshape=(sz // 4, sz // 3, sz // 8),
+            )
+
         # Coordinate labels.
-        font = ("sans-serif", max(8, sz // 6))
+        font_size = max(8, sz // 6)
+        font = ("sans-serif", font_size, "bold")
         for i in range(8):
             # File labels (bottom row).
             file_label = chr(ord("a") + (7 - i if self._flipped else i))
-            bx = i * sz + sz - 4
-            by = 8 * sz - 4
-            lbl_light = (((7 - i if self._flipped else i) + 0) % 2 != 0)
+            bx = i * sz + sz - 3
+            by = 8 * sz - 3
+            is_light = (((7 - i if self._flipped else i) + 0) % 2 != 0)
             self.create_text(
                 bx, by,
                 text=file_label,
                 font=font,
-                fill=_LIGHT_SQUARE if not lbl_light else _DARK_SQUARE,
+                fill=_COORD_DARK_FG if is_light else _COORD_LIGHT_FG,
                 anchor="se",
             )
             # Rank labels (left column).
             rank_label = str((i + 1) if self._flipped else (8 - i))
-            rx, ry = 4, i * sz + 4
-            rlbl_light = (
+            rx, ry = 3, i * sz + 3
+            is_light = (
                 (0 + (7 - i if not self._flipped else i)) % 2 != 0
             )
             self.create_text(
                 rx, ry,
                 text=rank_label,
                 font=font,
-                fill=_LIGHT_SQUARE if not rlbl_light else _DARK_SQUARE,
+                fill=_COORD_DARK_FG if is_light else _COORD_LIGHT_FG,
                 anchor="nw",
             )
 
@@ -288,6 +406,7 @@ class BoardWidget(tk.Canvas):
             )
 
             if move in self._board.legal_moves:
+                self._last_move = (from_sq, sq)
                 if self._on_move is not None:
                     self._on_move(from_sq, sq + (
                         chess.piece_symbol(promotion) if promotion else ""
@@ -337,23 +456,29 @@ class BoardWidget(tk.Canvas):
 
             dialog = tk.Toplevel(parent)
             dialog.withdraw()
-            dialog.title("Promotion")
+            dialog.title("Promote")
             dialog.transient(parent)
             dialog.resizable(False, False)
             dialog.configure(bg=_PROMOTION_BG)
+            dialog.overrideredirect(True)
+
+            inner = tk.Frame(dialog, bg=_PROMOTION_BG, bd=2, relief="solid",
+                             highlightbackground="#444466",
+                             highlightthickness=1)
+            inner.pack(fill="both", expand=True)
 
             tk.Label(
-                dialog,
-                text="Choose promotion:",
+                inner,
+                text="Promote to",
                 bg=_PROMOTION_BG,
                 fg=_PROMOTION_FG,
-                font=("sans-serif", 11, "bold"),
+                font=("sans-serif", 10, "bold"),
                 padx=10,
-                pady=8,
+                pady=6,
             ).pack()
 
-            btn_frame = tk.Frame(dialog, bg=_PROMOTION_BG)
-            btn_frame.pack(padx=8, pady=(0, 8))
+            btn_frame = tk.Frame(inner, bg=_PROMOTION_BG)
+            btn_frame.pack(padx=6, pady=(0, 8))
 
             pieces = [
                 (chess.QUEEN, "Q" if color == chess.WHITE else "q"),
@@ -371,14 +496,22 @@ class BoardWidget(tk.Canvas):
 
             for piece_type, fen_char in pieces:
                 symbol = UNICODE_PIECES[fen_char]
-                tk.Button(
+                btn = tk.Button(
                     btn_frame,
                     text=symbol,
-                    font=("sans-serif", 30),
+                    font=("sans-serif", 28),
                     command=make_handler(piece_type),
                     width=2,
                     height=1,
-                ).pack(side="left", padx=4, pady=2)
+                    bg=_PROMOTION_BTN_BG,
+                    fg=_PROMOTION_FG,
+                    activebackground=_PROMOTION_BTN_HOVER,
+                    activeforeground="#ffffff",
+                    relief="flat",
+                    bd=0,
+                    cursor="hand2",
+                )
+                btn.pack(side="left", padx=3, pady=2)
 
             dialog.protocol(
                 "WM_DELETE_WINDOW",
