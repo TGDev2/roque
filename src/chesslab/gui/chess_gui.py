@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import queue
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import chess
 
@@ -92,6 +92,7 @@ class ChessGui:
 
     def __init__(self, config: GuiConfig | None = None) -> None:
         self._config = config or GuiConfig()
+        self._engine_elo: int | None = self._config.analysis.engine_elo
         self._root: tk.Tk | None = None
         self._coach: GameCoach | None = None
         self._current_handle: ContinuousAnalysisHandle | None = None
@@ -116,15 +117,13 @@ class ChessGui:
         # Determine player color.
         player_color = self._config.player_color
         if player_color is None:
-            player_color = self._show_color_dialog(root)
+            player_color, self._engine_elo = self._show_color_dialog(
+                root,
+                default_engine_elo=self._engine_elo,
+            )
 
         # Create and start coach.
-        coach_config = CoachConfig(
-            player_color=player_color,
-            analysis=self._config.analysis,
-        )
-        self._coach = GameCoach(coach_config)
-        self._coach.start()
+        self._coach = self._create_coach(player_color, self._engine_elo)
 
         self._build_window(root, player_color)
 
@@ -134,17 +133,46 @@ class ChessGui:
         # Update status for initial turn.
         self._update_turn_status()
 
-        logger.info("ChessLab GUI started: player=%s", player_color.value)
+        logger.info(
+            "ChessLab GUI started: player=%s elo=%s",
+            player_color.value,
+            self._engine_elo if self._engine_elo is not None else "max",
+        )
         root.mainloop()
+
+    def _create_coach(
+        self,
+        player_color: PlayerColor,
+        engine_elo: int | None,
+    ) -> GameCoach:
+        """Create and start a GameCoach with the selected setup."""
+        analysis_config = replace(self._config.analysis, engine_elo=engine_elo)
+        coach = GameCoach(CoachConfig(
+            player_color=player_color,
+            analysis=analysis_config,
+        ))
+        coach.start()
+        return coach
 
     # -- Color selection dialog ----------------------------------------------
 
-    def _show_color_dialog(self, parent: tk.Tk) -> PlayerColor:
-        """Show a dialog to choose player color."""
-        result: list[PlayerColor] = [PlayerColor.WHITE]
+    def _show_color_dialog(
+        self,
+        parent: tk.Tk,
+        *,
+        default_engine_elo: int | None = None,
+    ) -> tuple[PlayerColor, int]:
+        """Show a dialog to choose player color and Stockfish Elo."""
+        initial_elo = (
+            default_engine_elo
+            if default_engine_elo is not None
+            else AnalysisConfig.DEFAULT_ENGINE_ELO
+        )
+        result: list[tuple[PlayerColor, int]] = [(PlayerColor.WHITE, initial_elo)]
+        elo_var = tk.IntVar(value=initial_elo)
 
         dialog = tk.Toplevel(parent)
-        dialog.title("ChessLab — Choose Color")
+        dialog.title("ChessLab — Color & Elo")
         dialog.configure(bg=_BG)
         dialog.transient(parent)
         dialog.grab_set()
@@ -155,11 +183,46 @@ class ChessGui:
             font=("sans-serif", 14, "bold"), padx=20, pady=10,
         ).pack()
 
+        elo_frame = tk.Frame(dialog, bg=_BG)
+        elo_frame.pack(fill="x", padx=20, pady=(0, 8))
+
+        tk.Label(
+            elo_frame,
+            text="Stockfish Elo",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Scale(
+            elo_frame,
+            from_=AnalysisConfig.MIN_ENGINE_ELO,
+            to=AnalysisConfig.MAX_ENGINE_ELO,
+            orient="horizontal",
+            resolution=10,
+            variable=elo_var,
+            bg=_BG,
+            fg=_FG,
+            troughcolor="#2f2f2f",
+            highlightthickness=0,
+            length=280,
+        ).pack(fill="x")
+
+        tk.Label(
+            elo_frame,
+            textvariable=elo_var,
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("monospace", 10),
+            anchor="e",
+        ).pack(fill="x")
+
         btn_frame = tk.Frame(dialog, bg=_BG)
         btn_frame.pack(pady=10, padx=20)
 
         def choose(color: PlayerColor) -> None:
-            result[0] = color
+            result[0] = (color, int(elo_var.get()))
             dialog.destroy()
 
         tk.Button(
@@ -400,14 +463,11 @@ class ChessGui:
         self._current_handle = None
 
         assert self._root is not None
-        player_color = self._show_color_dialog(self._root)
-
-        coach_config = CoachConfig(
-            player_color=player_color,
-            analysis=self._config.analysis,
+        player_color, self._engine_elo = self._show_color_dialog(
+            self._root,
+            default_engine_elo=self._engine_elo,
         )
-        self._coach = GameCoach(coach_config)
-        self._coach.start()
+        self._coach = self._create_coach(player_color, self._engine_elo)
 
         assert self._board_widget is not None
         self._board_widget.set_flipped(player_color == PlayerColor.BLACK)
@@ -423,7 +483,11 @@ class ChessGui:
         self._history_panel.set_history(())
 
         self._update_turn_status()
-        logger.info("New game started: player=%s", player_color.value)
+        logger.info(
+            "New game started: player=%s elo=%d",
+            player_color.value,
+            self._engine_elo,
+        )
 
     def _on_close(self) -> None:
         """Clean up resources and close the window."""

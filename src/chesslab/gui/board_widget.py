@@ -40,6 +40,8 @@ _LIGHT_SQUARE = "#f0d9b5"
 _DARK_SQUARE = "#b58863"
 _SELECTED_COLOUR = "#f6f669"
 _LEGAL_DEST_COLOUR = "#829769"
+_PROMOTION_BG = "#2b2b2b"
+_PROMOTION_FG = "#f0f0f0"
 
 MoveCallback = Callable[[str, str], None]
 
@@ -299,7 +301,10 @@ class BoardWidget(tk.Canvas):
 
     def _check_promotion(self, from_sq: str, to_sq: str) -> int | None:
         """Check if a pawn move requires promotion and show dialog."""
-        piece = self._board.piece_at(chess.parse_square(from_sq))
+        from_square = chess.parse_square(from_sq)
+        to_square = chess.parse_square(to_sq)
+
+        piece = self._board.piece_at(from_square)
         if piece is None or piece.piece_type != chess.PAWN:
             return None
 
@@ -307,43 +312,104 @@ class BoardWidget(tk.Canvas):
         if (piece.color == chess.WHITE and to_rank == 8) or (
             piece.color == chess.BLACK and to_rank == 1
         ):
+            # Ask for promotion only when at least one promotion move is legal.
+            promotion_moves = [
+                chess.Move(from_square, to_square, promotion=piece_type)
+                for piece_type in (
+                    chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT
+                )
+            ]
+            if not any(move in self._board.legal_moves for move in promotion_moves):
+                return None
             return self._show_promotion_dialog(piece.color)
         return None
 
     def _show_promotion_dialog(self, color: chess.Color) -> int:
         """Show a dialog to choose promotion piece. Returns piece type."""
         result: list[int] = [chess.QUEEN]
+        if not self.winfo_exists():
+            return result[0]
 
-        dialog = tk.Toplevel(self)
-        dialog.title("Promotion")
-        dialog.transient(self.winfo_toplevel())
-        dialog.grab_set()
-        dialog.resizable(False, False)
+        try:
+            parent = self.winfo_toplevel()
+            if not parent.winfo_exists() or not parent.winfo_viewable():
+                return result[0]
 
-        pieces = [
-            (chess.QUEEN, "Q" if color == chess.WHITE else "q"),
-            (chess.ROOK, "R" if color == chess.WHITE else "r"),
-            (chess.BISHOP, "B" if color == chess.WHITE else "b"),
-            (chess.KNIGHT, "N" if color == chess.WHITE else "n"),
-        ]
+            dialog = tk.Toplevel(parent)
+            dialog.withdraw()
+            dialog.title("Promotion")
+            dialog.transient(parent)
+            dialog.resizable(False, False)
+            dialog.configure(bg=_PROMOTION_BG)
 
-        for piece_type, fen_char in pieces:
-            symbol = UNICODE_PIECES[fen_char]
+            tk.Label(
+                dialog,
+                text="Choose promotion:",
+                bg=_PROMOTION_BG,
+                fg=_PROMOTION_FG,
+                font=("sans-serif", 11, "bold"),
+                padx=10,
+                pady=8,
+            ).pack()
+
+            btn_frame = tk.Frame(dialog, bg=_PROMOTION_BG)
+            btn_frame.pack(padx=8, pady=(0, 8))
+
+            pieces = [
+                (chess.QUEEN, "Q" if color == chess.WHITE else "q"),
+                (chess.ROOK, "R" if color == chess.WHITE else "r"),
+                (chess.BISHOP, "B" if color == chess.WHITE else "b"),
+                (chess.KNIGHT, "N" if color == chess.WHITE else "n"),
+            ]
 
             def make_handler(pt: int) -> Callable[[], None]:
                 def handler() -> None:
                     result[0] = pt
-                    dialog.destroy()
+                    if dialog.winfo_exists():
+                        dialog.destroy()
                 return handler
 
-            tk.Button(
-                dialog,
-                text=symbol,
-                font=("sans-serif", 32),
-                command=make_handler(piece_type),
-                width=3,
-                height=1,
-            ).pack(side="left", padx=4, pady=4)
+            for piece_type, fen_char in pieces:
+                symbol = UNICODE_PIECES[fen_char]
+                tk.Button(
+                    btn_frame,
+                    text=symbol,
+                    font=("sans-serif", 30),
+                    command=make_handler(piece_type),
+                    width=2,
+                    height=1,
+                ).pack(side="left", padx=4, pady=2)
 
-        dialog.wait_window()
+            dialog.protocol(
+                "WM_DELETE_WINDOW",
+                lambda: dialog.destroy() if dialog.winfo_exists() else None,
+            )
+
+            # Center on parent before making the dialog visible.
+            parent.update_idletasks()
+            dialog.update_idletasks()
+            x = parent.winfo_rootx() + (parent.winfo_width() - dialog.winfo_width()) // 2
+            y = parent.winfo_rooty() + (
+                parent.winfo_height() - dialog.winfo_height()
+            ) // 2
+            dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+            dialog.deiconify()
+            dialog.lift(parent)
+            dialog.focus_set()
+            dialog.wait_visibility()
+            try:
+                dialog.grab_set()
+            except tk.TclError:
+                logger.debug(
+                    "Promotion dialog grab skipped because window is not viewable.",
+                    exc_info=True,
+                )
+
+            self.wait_window(dialog)
+        except tk.TclError:
+            logger.debug(
+                "Promotion dialog skipped because GUI is closing.",
+                exc_info=True,
+            )
         return result[0]

@@ -21,6 +21,7 @@ Limitations
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -28,7 +29,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, ClassVar
 
@@ -89,10 +90,17 @@ class AnalysisConfig:
         (``os.cpu_count() - 1``, minimum 1).
     hash_mb:
         Hash table size in megabytes for Stockfish.  Default 128.
+    engine_elo:
+        Optional Stockfish limited-strength Elo.  When set, ChessLab enables
+        ``UCI_LimitStrength`` with ``UCI_Elo=<value>`` so suggestions reflect
+        that approximate skill level instead of full-strength engine play.
     """
 
     MIN_USER_DEPTH: ClassVar[int] = 10
     MAX_USER_DEPTH: ClassVar[int] = 25
+    MIN_ENGINE_ELO: ClassVar[int] = 1320
+    MAX_ENGINE_ELO: ClassVar[int] = 3190
+    DEFAULT_ENGINE_ELO: ClassVar[int] = 1800
 
     stockfish_path: str = "stockfish"
     depth: int = 18
@@ -100,6 +108,7 @@ class AnalysisConfig:
     multipv: int = 3
     threads: int | None = None
     hash_mb: int = 128
+    engine_elo: int | None = None
 
     def __post_init__(self) -> None:
         if self.depth < 1:
@@ -112,6 +121,13 @@ class AnalysisConfig:
             raise ValueError(f"threads must be >= 1 or None, got {self.threads}.")
         if self.hash_mb < 1:
             raise ValueError(f"hash_mb must be >= 1, got {self.hash_mb}.")
+        if self.engine_elo is not None and not (
+            self.MIN_ENGINE_ELO <= self.engine_elo <= self.MAX_ENGINE_ELO
+        ):
+            raise ValueError(
+                f"engine_elo must be between {self.MIN_ENGINE_ELO} and "
+                f"{self.MAX_ENGINE_ELO}, got {self.engine_elo}.",
+            )
 
     # -- Persistence ---------------------------------------------------------
 
@@ -435,11 +451,12 @@ class PositionAnalyser:
         threads = self._resolve_threads()
         engine_command = self._resolve_stockfish_command()
         logger.info(
-            "Starting Stockfish: path=%s resolved=%s threads=%d hash=%dMB",
+            "Starting Stockfish: path=%s resolved=%s threads=%d hash=%dMB elo=%s",
             self._config.stockfish_path,
             engine_command,
             threads,
             self._config.hash_mb,
+            self._config.engine_elo if self._config.engine_elo is not None else "max",
         )
 
         try:
@@ -451,7 +468,18 @@ class PositionAnalyser:
                 self._format_engine_not_found_error(engine_command, exc),
             ) from exc
 
-        self._engine.configure({"Threads": threads, "Hash": self._config.hash_mb})
+        engine_options: dict[str, int | bool] = {
+            "Threads": threads,
+            "Hash": self._config.hash_mb,
+        }
+        if self._config.engine_elo is not None:
+            engine_options["UCI_LimitStrength"] = True
+            engine_options["UCI_Elo"] = self._config.engine_elo
+            engine_options["Skill Level"] = self._elo_to_skill_level(
+                self._config.engine_elo,
+            )
+
+        self._engine.configure(engine_options)
         logger.info("Stockfish engine started successfully.")
 
     def stop(self) -> None:
@@ -542,22 +570,24 @@ class PositionAnalyser:
             )
 
         # Engine analysis with depth + time limit.
-        limit = chess.engine.Limit(
-            depth=self._config.depth,
-            time=self._config.time_limit,
-        )
+        limit = self._build_search_limit()
+        target_depth = limit.depth if limit.depth is not None else self._config.depth
+        target_time = limit.time if limit.time is not None else self._config.time_limit
+        effective_multipv = self._effective_multipv()
         logger.debug(
-            "Analysing FEN=%s depth=%d time=%.1fs multipv=%d",
+            "Analysing FEN=%s depth=%d time=%.3fs multipv=%d/%d elo=%s",
             fen,
-            self._config.depth,
-            self._config.time_limit,
+            target_depth,
+            target_time,
+            effective_multipv,
             self._config.multipv,
+            self._config.engine_elo if self._config.engine_elo is not None else "max",
         )
 
         infos: list[chess.engine.InfoDict] = self._engine.analyse(
             board,
             limit,
-            multipv=self._config.multipv,
+            multipv=effective_multipv,
         )
 
         elapsed = (time.perf_counter() - t0) * 1000.0
@@ -566,9 +596,11 @@ class PositionAnalyser:
         variations: list[VariationInfo] = []
         for rank, info in enumerate(infos, start=1):
             variations.append(self._to_variation_info(info, board, rank))
+        variations = list(self._apply_strength_profile(fen, tuple(variations)))
+        variations = variations[:self._config.multipv]
 
         depth_reached = variations[0].depth if variations else 0
-        is_partial = depth_reached < self._config.depth
+        is_partial = depth_reached < target_depth
 
         best_move_uci = variations[0].move_uci if variations else ""
         best_move_san = variations[0].move_san if variations else ""
@@ -690,14 +722,12 @@ class PositionAnalyser:
             ))
             return
 
-        limit = chess.engine.Limit(
-            depth=self._config.depth,
-            time=self._config.time_limit,
-        )
+        limit = self._build_search_limit()
+        effective_multipv = self._effective_multipv()
 
         try:
             with self._engine.analysis(
-                board, limit, multipv=self._config.multipv,
+                board, limit, multipv=effective_multipv,
             ) as stream:
                 previous_depth = 0
                 for _info in stream:
@@ -722,6 +752,8 @@ class PositionAnalyser:
                         variations.append(
                             self._to_variation_info(info, board, rank),
                         )
+                    variations = list(self._apply_strength_profile(fen, tuple(variations)))
+                    variations = variations[:self._config.multipv]
 
                     best_uci = variations[0].move_uci if variations else ""
                     best_san = variations[0].move_san if variations else ""
@@ -746,6 +778,126 @@ class PositionAnalyser:
             logger.exception("Continuous analysis worker failed.")
 
     # -- Private helpers -----------------------------------------------------
+
+    def _build_search_limit(self) -> chess.engine.Limit:
+        """Build an effective search limit, scaled by selected Elo if set."""
+        if self._config.engine_elo is None:
+            return chess.engine.Limit(
+                depth=self._config.depth,
+                time=self._config.time_limit,
+            )
+
+        elo_ratio = self._elo_ratio(self._config.engine_elo)
+
+        # Strongly cap search at low Elo so move quality drops noticeably.
+        min_depth = min(4, self._config.depth)
+        effective_depth = int(round(
+            min_depth + elo_ratio * (self._config.depth - min_depth),
+        ))
+
+        min_time = min(0.03, self._config.time_limit)
+        effective_time = min_time + elo_ratio * (self._config.time_limit - min_time)
+
+        return chess.engine.Limit(
+            depth=max(1, effective_depth),
+            time=max(0.01, round(effective_time, 3)),
+        )
+
+    @staticmethod
+    def _elo_ratio(elo: int) -> float:
+        """Return normalised Elo ratio in [0.0, 1.0]."""
+        span = AnalysisConfig.MAX_ENGINE_ELO - AnalysisConfig.MIN_ENGINE_ELO
+        if span <= 0:
+            return 1.0
+        ratio = (elo - AnalysisConfig.MIN_ENGINE_ELO) / span
+        return max(0.0, min(1.0, ratio))
+
+    def _elo_to_skill_level(self, elo: int) -> int:
+        """Map Elo to Stockfish Skill Level [0, 20]."""
+        return int(round(self._elo_ratio(elo) * 20.0))
+
+    def _effective_multipv(self) -> int:
+        """Increase candidate pool at low Elo so weaker moves can be selected."""
+        if self._config.engine_elo is None:
+            return self._config.multipv
+
+        elo_ratio = self._elo_ratio(self._config.engine_elo)
+        extra_candidates = int(round((1.0 - elo_ratio) * 9.0))
+        return self._config.multipv + extra_candidates
+
+    def _apply_strength_profile(
+        self,
+        fen: str,
+        variations: tuple[VariationInfo, ...],
+    ) -> tuple[VariationInfo, ...]:
+        """Apply Elo-dependent move choice to avoid always returning top line."""
+        if self._config.engine_elo is None or len(variations) <= 1:
+            return variations
+
+        elo_ratio = self._elo_ratio(self._config.engine_elo)
+        top_cp = self._score_to_centipawns(variations[0].evaluation)
+        tolerance_cp = 220.0 - (180.0 * elo_ratio)
+        index_alpha = 0.25 + (1.75 * elo_ratio)
+
+        weights: list[float] = []
+        for idx, variation in enumerate(variations):
+            cp_gap = max(
+                0,
+                top_cp - self._score_to_centipawns(variation.evaluation),
+            )
+            quality_weight = math.exp(-cp_gap / tolerance_cp) if cp_gap > 0 else 1.0
+            index_weight = 1.0 / ((idx + 1) ** index_alpha)
+            weights.append(quality_weight * index_weight)
+
+        # At very low Elo, explicitly lower the top-line dominance.
+        if weights and elo_ratio < 0.35:
+            top_scale = 0.55 + elo_ratio
+            weights[0] *= top_scale
+
+        selected_index = self._pick_weighted_index(fen, weights)
+        if selected_index == 0:
+            return variations
+
+        ordered = [variations[selected_index]]
+        ordered.extend(
+            variation
+            for idx, variation in enumerate(variations)
+            if idx != selected_index
+        )
+        return tuple(
+            replace(variation, rank=index + 1)
+            for index, variation in enumerate(ordered)
+        )
+
+    def _pick_weighted_index(self, fen: str, weights: list[float]) -> int:
+        """Pick a stable weighted index from FEN + Elo."""
+        total = sum(weights)
+        if total <= 0:
+            return 0
+
+        elo = self._config.engine_elo
+        assert elo is not None
+
+        digest = hashlib.sha256(f"{fen}|{elo}".encode("utf-8")).digest()
+        roll = int.from_bytes(digest[:8], "big") / float(1 << 64)
+        target = roll * total
+
+        cumulative = 0.0
+        for idx, weight in enumerate(weights):
+            cumulative += weight
+            if target <= cumulative:
+                return idx
+        return len(weights) - 1
+
+    @staticmethod
+    def _score_to_centipawns(evaluation: Evaluation) -> int:
+        """Convert evaluation (including mate scores) to comparable centipawns."""
+        if evaluation.centipawns is not None:
+            return evaluation.centipawns
+        assert evaluation.mate_in is not None
+        if evaluation.mate_in > 0:
+            return 100_000
+        return -100_000
 
     def _resolve_threads(self) -> int:
         """Resolve the number of Stockfish threads to use."""

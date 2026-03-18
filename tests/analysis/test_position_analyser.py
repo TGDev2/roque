@@ -132,6 +132,7 @@ class TestAnalysisConfig:
         assert config.multipv == 3
         assert config.threads is None
         assert config.hash_mb == 128
+        assert config.engine_elo is None
 
     def test_custom_values(self) -> None:
         config = AnalysisConfig(
@@ -141,9 +142,11 @@ class TestAnalysisConfig:
             multipv=5,
             threads=4,
             hash_mb=256,
+            engine_elo=1900,
         )
         assert config.depth == 20
         assert config.threads == 4
+        assert config.engine_elo == 1900
 
     def test_depth_below_minimum_rejected(self) -> None:
         with pytest.raises(ValueError, match="depth"):
@@ -172,6 +175,14 @@ class TestAnalysisConfig:
     def test_hash_mb_below_minimum_rejected(self) -> None:
         with pytest.raises(ValueError, match="hash_mb"):
             AnalysisConfig(hash_mb=0)
+
+    def test_engine_elo_below_minimum_rejected(self) -> None:
+        with pytest.raises(ValueError, match="engine_elo"):
+            AnalysisConfig(engine_elo=AnalysisConfig.MIN_ENGINE_ELO - 1)
+
+    def test_engine_elo_above_maximum_rejected(self) -> None:
+        with pytest.raises(ValueError, match="engine_elo"):
+            AnalysisConfig(engine_elo=AnalysisConfig.MAX_ENGINE_ELO + 1)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +658,65 @@ class TestVariationDetails:
         assert limit.time == 3.0
         assert call_args[1].get("multipv", call_args[0][2] if len(call_args[0]) > 2 else None) == 5
 
+    def test_engine_called_with_reduced_limits_for_low_elo(self) -> None:
+        config = AnalysisConfig(
+            depth=18,
+            time_limit=2.0,
+            multipv=3,
+            engine_elo=AnalysisConfig.MIN_ENGINE_ELO,
+        )
+        analyser, mock_engine = _make_analyser_with_mock(config)
+        board = chess.Board(STARTING_FEN)
+        e2e4 = board.parse_uci("e2e4")
+        _setup_mock_analysis(
+            mock_engine,
+            [_make_info(score=_make_pov_score_cp(20), pv=[e2e4], depth=4)],
+        )
+        analyser.analyse(STARTING_FEN)
+
+        call_args = mock_engine.analyse.call_args
+        limit = call_args[0][1] if len(call_args[0]) > 1 else call_args[1]["limit"]
+        assert limit.depth == 4
+        assert limit.time == pytest.approx(0.03)
+        assert call_args[1].get("multipv", call_args[0][2] if len(call_args[0]) > 2 else None) == 12
+
+    def test_low_elo_reorders_variations_for_weaker_recommendation(self) -> None:
+        analyser = PositionAnalyser(AnalysisConfig(engine_elo=AnalysisConfig.MIN_ENGINE_ELO))
+        variations = (
+            VariationInfo(
+                rank=1,
+                move_uci="e2e4",
+                move_san="e4",
+                evaluation=Evaluation(centipawns=20, mate_in=None),
+                pv_uci=("e2e4",),
+                pv_san=("e4",),
+                depth=10,
+            ),
+            VariationInfo(
+                rank=2,
+                move_uci="d2d4",
+                move_san="d4",
+                evaluation=Evaluation(centipawns=18, mate_in=None),
+                pv_uci=("d2d4",),
+                pv_san=("d4",),
+                depth=10,
+            ),
+            VariationInfo(
+                rank=3,
+                move_uci="c2c4",
+                move_san="c4",
+                evaluation=Evaluation(centipawns=17, mate_in=None),
+                pv_uci=("c2c4",),
+                pv_san=("c4",),
+                depth=10,
+            ),
+        )
+
+        adjusted = analyser._apply_strength_profile(STARTING_FEN, variations)
+
+        assert adjusted[0].move_uci == "c2c4"
+        assert [v.rank for v in adjusted] == [1, 2, 3]
+
     def test_engine_configured_with_threads_and_hash(self) -> None:
         config = AnalysisConfig(threads=6, hash_mb=256)
         with patch(
@@ -657,6 +727,26 @@ class TestVariationDetails:
             analyser.start()
             engine = analyser._engine
             engine.configure.assert_called_once_with({"Threads": 6, "Hash": 256})
+            analyser.stop()
+
+    def test_engine_configured_with_limited_strength_elo(self) -> None:
+        config = AnalysisConfig(threads=2, hash_mb=64, engine_elo=1700)
+        with patch(
+            "chesslab.analysis.position_analyser.chess.engine.SimpleEngine.popen_uci",
+            return_value=MagicMock(spec=chess.engine.SimpleEngine),
+        ) as _:
+            analyser = PositionAnalyser(config)
+            analyser.start()
+            engine = analyser._engine
+            engine.configure.assert_called_once_with(
+                {
+                    "Threads": 2,
+                    "Hash": 64,
+                    "UCI_LimitStrength": True,
+                    "UCI_Elo": 1700,
+                    "Skill Level": 4,
+                },
+            )
             analyser.stop()
 
 
