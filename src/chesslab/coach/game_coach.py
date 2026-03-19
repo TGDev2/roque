@@ -393,6 +393,25 @@ class GameCoach:
         return self._board.turn != self._opponent_chess_color
 
     @property
+    def board(self) -> chess.Board:
+        """A copy of the internal board (for PGN export)."""
+        return self._board.copy()
+
+    def load_board(self, board: chess.Board) -> None:
+        """Replace the internal board with a pre-populated one.
+
+        Used when loading a saved game.  The board should have a
+        complete ``move_stack`` representing the game history.
+        """
+        self.stop_analysis()
+        self._board = board.copy()
+        logger.info(
+            "Board loaded: %s (%d moves)",
+            self._board.fen(),
+            len(self._board.move_stack),
+        )
+
+    @property
     def move_history(self) -> tuple[str, ...]:
         """SAN moves played so far, in order."""
         replay = chess.Board()

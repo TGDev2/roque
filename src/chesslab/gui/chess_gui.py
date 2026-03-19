@@ -22,8 +22,12 @@ import logging
 import queue
 import tkinter as tk
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from tkinter import filedialog
 
 import chess
+
+from chesslab.persistence.game_storage import GameStorage, build_headers
 
 from chesslab.analysis import AnalysisConfig, ContinuousAnalysisHandle
 from chesslab.coach.game_coach import (
@@ -186,6 +190,10 @@ class ChessGui:
         self._observer: LiveObserver | None = None
         self._observation_queue: queue.Queue[ObservationEvent] = queue.Queue()
         self._observing: bool = False
+
+        # Persistence.
+        self._storage = GameStorage()
+        self._game_saved: bool = False
 
         # Widgets (populated by _build_window).
         self._observe_btn: tk.Button | None = None
@@ -461,6 +469,34 @@ class ChessGui:
             font=("sans-serif", 10),
         )
         new_game_btn.pack(fill="x", pady=(0, 4))
+
+        # PGN buttons row.
+        pgn_frame = tk.Frame(panel_frame, bg=_BG)
+        pgn_frame.pack(fill="x", pady=(0, 4))
+
+        export_btn = _styled_button(
+            pgn_frame,
+            text="Export PGN",
+            command=self._on_export_pgn,
+            font=("sans-serif", 9),
+        )
+        export_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+
+        load_btn = _styled_button(
+            pgn_frame,
+            text="Load PGN",
+            command=self._on_load_pgn,
+            font=("sans-serif", 9),
+        )
+        load_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
+
+        recent_btn = _styled_button(
+            pgn_frame,
+            text="Recent",
+            command=self._on_recent_games,
+            font=("sans-serif", 9),
+        )
+        recent_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         # Bottom status bar.
         status_bar = tk.Frame(root, bg=_STATUS_BG, height=40)
@@ -975,6 +1011,7 @@ class ChessGui:
         assert self._coach is not None
 
         if self._coach.is_game_over:
+            self._auto_save()
             outcome = chess.Board(self._coach.current_fen).outcome()
             if outcome and outcome.winner is not None:
                 winner = "White" if outcome.winner else "Black"
@@ -1021,11 +1058,15 @@ class ChessGui:
 
     def _on_new_game(self) -> None:
         """Start a new game."""
+        self._auto_save()
+
         if self._observing:
             self._stop_observation()
 
         if self._coach is not None:
             self._coach.stop()
+
+        self._game_saved = False
 
         # Clear queue.
         while not self._update_queue.empty():
@@ -1068,6 +1109,7 @@ class ChessGui:
 
     def _on_close(self) -> None:
         """Clean up resources and close the window."""
+        self._auto_save()
         if self._observer is not None:
             self._observer.stop()
         if self._coach is not None:
@@ -1076,3 +1118,213 @@ class ChessGui:
             self._root.destroy()
             self._root = None
         logger.info("ChessLab GUI closed.")
+
+    # -- Persistence ---------------------------------------------------------
+
+    def _build_headers(self) -> dict[str, str]:
+        """Build PGN headers from the current game state."""
+        assert self._coach is not None
+        player_color = self._coach._config.player_color
+
+        outcome = self._coach.board.outcome()
+        if outcome is not None:
+            result = self._coach.board.result()
+        else:
+            result = "*"
+
+        return build_headers(
+            player_color=player_color,
+            engine_elo=self._engine_elo,
+            result=result,
+        )
+
+    def _auto_save(self) -> None:
+        """Auto-save the current game if it has moves."""
+        if self._game_saved:
+            return
+        if self._coach is None:
+            return
+
+        board = self._coach.board
+        if not board.move_stack:
+            return
+
+        try:
+            path = self._storage.save_game(board, self._build_headers())
+            if path is not None:
+                self._game_saved = True
+                logger.info("Auto-saved game: %s", path)
+        except Exception:
+            logger.exception("Failed to auto-save game.")
+
+    def _on_export_pgn(self) -> None:
+        """Export the current game to a user-chosen PGN file."""
+        if self._coach is None or not self._coach.board.move_stack:
+            self._set_status("No moves to export", error=True)
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pgn",
+            filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")],
+            title="Export PGN",
+        )
+        if not path:
+            return
+
+        try:
+            GameStorage.export_game(
+                self._coach.board, self._build_headers(), Path(path),
+            )
+            self._set_status("PGN exported")
+        except Exception:
+            logger.exception("Failed to export PGN.")
+            self._set_status("Export failed", error=True)
+
+    def _on_load_pgn(self) -> None:
+        """Load a PGN file and display it on the board."""
+        path = filedialog.askopenfilename(
+            filetypes=[("PGN files", "*.pgn"), ("All files", "*.*")],
+            title="Load PGN",
+        )
+        if not path:
+            return
+
+        self._load_pgn_file(Path(path))
+
+    def _load_pgn_file(self, file_path: Path) -> None:
+        """Load a PGN from the given path into the GUI."""
+        try:
+            record = GameStorage.load_game(file_path)
+        except Exception as exc:
+            self._set_status(f"Load failed: {exc}", error=True)
+            logger.exception("Failed to load PGN.")
+            return
+
+        assert self._coach is not None
+        self._game_saved = False
+        self._auto_save()
+
+        self._coach.load_board(record.board)
+        self._game_saved = True  # Loaded game doesn't need re-saving.
+
+        self._best_move_uci = None
+        self._current_handle = None
+
+        assert self._board_widget is not None
+        assert self._history_panel is not None
+        assert self._eval_panel is not None
+        assert self._suggestions_panel is not None
+
+        self._board_widget.set_position(self._coach.current_fen)
+        self._board_widget.clear_last_move()
+        self._board_widget.clear_highlights()
+        self._history_panel.set_history(self._coach.move_history)
+        self._eval_panel.update_eval(None, 0, is_loading=False)
+        self._suggestions_panel.update_suggestions(())
+        self._update_turn_status()
+
+        self._set_status(f"Loaded: {file_path.name}")
+        logger.info("PGN loaded: %s", file_path)
+
+    def _on_recent_games(self) -> None:
+        """Show a dialog listing recently saved games."""
+        assert self._root is not None
+        games = self._storage.list_recent_games()
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Recent Games")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            container, text="Recent Games", bg=_BG, fg=_FG,
+            font=("sans-serif", 14, "bold"),
+        ).pack(pady=(0, 12))
+
+        if not games:
+            tk.Label(
+                container, text="No saved games", bg=_BG, fg=_FG_DIM,
+                font=("sans-serif", 10),
+            ).pack(pady=20)
+        else:
+            list_frame = tk.Frame(container, bg=_CARD_BORDER)
+            list_frame.pack(fill="both", expand=True)
+
+            listbox = tk.Listbox(
+                list_frame,
+                bg=_BG_SECONDARY,
+                fg=_FG,
+                font=("monospace", 10),
+                selectbackground=_ACCENT,
+                selectforeground="#ffffff",
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                height=min(len(games), 12),
+                width=50,
+            )
+            listbox.pack(fill="both", expand=True, padx=1, pady=1)
+
+            for g in games:
+                line = (
+                    f"{g.date}  {g.white} vs {g.black}"
+                    f"  {g.result}  {g.move_count} moves"
+                )
+                listbox.insert("end", line)
+
+            def on_load() -> None:
+                sel = listbox.curselection()
+                if not sel:
+                    return
+                selected_game = games[sel[0]]
+                dialog.destroy()
+                self._load_pgn_file(selected_game.file_path)
+
+            listbox.bind("<Double-Button-1>", lambda e: on_load())
+
+            btn_frame = tk.Frame(container, bg=_BG)
+            btn_frame.pack(fill="x", pady=(8, 0))
+
+            load_btn = _styled_button(
+                btn_frame,
+                text="Load",
+                command=on_load,
+                bg=_BTN_ACCENT_BG,
+                fg=_BTN_ACCENT_FG,
+                hover_bg=_BTN_ACCENT_HOVER,
+                active_bg="#1e88e5",
+                font=("sans-serif", 10, "bold"),
+            )
+            load_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+            cancel_btn = _styled_button(
+                btn_frame,
+                text="Cancel",
+                command=dialog.destroy,
+                font=("sans-serif", 10),
+            )
+            cancel_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        if not games:
+            close_btn = _styled_button(
+                container,
+                text="Close",
+                command=dialog.destroy,
+                font=("sans-serif", 10),
+            )
+            close_btn.pack(pady=(8, 0))
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+

@@ -758,3 +758,54 @@ class TestMoveHistory:
         coach.submit_player_move("e5")
 
         assert coach.move_history == ("e4", "e5")
+
+
+# ---------------------------------------------------------------------------
+# Board property and load_board
+# ---------------------------------------------------------------------------
+
+
+class TestBoardProperty:
+    """The board property returns a safe copy of the internal board."""
+
+    def test_returns_copy(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        board_copy = coach.board
+        board_copy.push_san("e4")
+
+        # Internal board should be unchanged.
+        assert coach.current_fen == chess.STARTING_FEN
+
+    def test_reflects_current_state(self) -> None:
+        coach, mock_engine = _make_coach_with_mock()
+        coach.submit_player_move("e4")
+
+        board_copy = coach.board
+        assert len(board_copy.move_stack) == 1
+
+
+class TestLoadBoard:
+    """load_board replaces internal board state."""
+
+    def test_replaces_state(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        new_board = chess.Board()
+        new_board.push_san("e4")
+        new_board.push_san("e5")
+        new_board.push_san("Nf3")
+
+        coach.load_board(new_board)
+
+        assert len(coach.board.move_stack) == 3
+        assert coach.move_history == ("e4", "e5", "Nf3")
+
+    def test_loaded_board_is_independent(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        new_board = chess.Board()
+        new_board.push_san("d4")
+
+        coach.load_board(new_board)
+        new_board.push_san("d5")
+
+        # Coach board should NOT have d5.
+        assert coach.move_history == ("d4",)
