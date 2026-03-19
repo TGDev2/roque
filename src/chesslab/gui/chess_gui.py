@@ -267,6 +267,7 @@ class ChessGui:
             if default_engine_elo is not None
             else AnalysisConfig.DEFAULT_ENGINE_ELO
         )
+        initial_elo = AnalysisConfig.snap_engine_elo(initial_elo)
         result: list[tuple[PlayerColor, int]] = [(PlayerColor.WHITE, initial_elo)]
         elo_var = tk.IntVar(value=initial_elo)
 
@@ -301,23 +302,41 @@ class ChessGui:
             font=("sans-serif", 11, "bold"), anchor="w",
         ).pack(side="left")
 
+        elo_value_frame = tk.Frame(elo_header, bg=_BG_SECONDARY)
+        elo_value_frame.pack(side="right")
+
         elo_value_label = tk.Label(
-            elo_header, text=str(initial_elo), bg=_BG_SECONDARY, fg=_ACCENT,
+            elo_value_frame, text=str(initial_elo), bg=_BG_SECONDARY, fg=_ACCENT,
             font=("monospace", 14, "bold"), anchor="e",
         )
-        elo_value_label.pack(side="right")
+        elo_value_label.pack(anchor="e")
+
+        level_value_label = tk.Label(
+            elo_value_frame, text="", bg=_BG_SECONDARY, fg=_FG_DIM,
+            font=("sans-serif", 8), anchor="e",
+        )
+        level_value_label.pack(anchor="e")
 
         def _on_elo_change(*_args: object) -> None:
-            elo_value_label.config(text=str(elo_var.get()))
+            snapped_elo = AnalysisConfig.snap_engine_elo(elo_var.get())
+            if snapped_elo != elo_var.get():
+                elo_var.set(snapped_elo)
+                return
+
+            level = AnalysisConfig.engine_level_from_elo(snapped_elo)
+            max_level = AnalysisConfig.selectable_engine_levels()
+            elo_value_label.config(text=str(snapped_elo))
+            level_value_label.config(text=f"Level {level}/{max_level}")
 
         elo_var.trace_add("write", _on_elo_change)
+        _on_elo_change()
 
         scale = tk.Scale(
             elo_inner,
-            from_=AnalysisConfig.MIN_ENGINE_ELO,
-            to=AnalysisConfig.MAX_ENGINE_ELO,
+            from_=AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO,
+            to=AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO,
             orient="horizontal",
-            resolution=10,
+            resolution=AnalysisConfig.ENGINE_ELO_STEP,
             variable=elo_var,
             bg=_BG_SECONDARY,
             fg=_FG_DIM,
@@ -334,11 +353,11 @@ class ChessGui:
         range_frame = tk.Frame(elo_inner, bg=_BG_SECONDARY)
         range_frame.pack(fill="x", padx=12, pady=(0, 8))
         tk.Label(
-            range_frame, text=str(AnalysisConfig.MIN_ENGINE_ELO),
+            range_frame, text=str(AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO),
             bg=_BG_SECONDARY, fg=_FG_MUTED, font=("monospace", 8),
         ).pack(side="left")
         tk.Label(
-            range_frame, text=str(AnalysisConfig.MAX_ENGINE_ELO),
+            range_frame, text=str(AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO),
             bg=_BG_SECONDARY, fg=_FG_MUTED, font=("monospace", 8),
         ).pack(side="right")
 
@@ -1327,4 +1346,3 @@ class ChessGui:
             self._root.winfo_height() - dialog.winfo_height()
         ) // 2
         dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
-

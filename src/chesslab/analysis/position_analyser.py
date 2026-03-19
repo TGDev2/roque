@@ -100,6 +100,13 @@ class AnalysisConfig:
     MAX_USER_DEPTH: ClassVar[int] = 25
     MIN_ENGINE_ELO: ClassVar[int] = 1320
     MAX_ENGINE_ELO: ClassVar[int] = 3190
+    ENGINE_ELO_STEP: ClassVar[int] = 100
+    MIN_SELECTABLE_ENGINE_ELO: ClassVar[int] = (
+        ((MIN_ENGINE_ELO + ENGINE_ELO_STEP - 1) // ENGINE_ELO_STEP) * ENGINE_ELO_STEP
+    )
+    MAX_SELECTABLE_ENGINE_ELO: ClassVar[int] = (
+        (MAX_ENGINE_ELO // ENGINE_ELO_STEP) * ENGINE_ELO_STEP
+    )
     DEFAULT_ENGINE_ELO: ClassVar[int] = 1800
 
     stockfish_path: str = "stockfish"
@@ -128,6 +135,33 @@ class AnalysisConfig:
                 f"engine_elo must be between {self.MIN_ENGINE_ELO} and "
                 f"{self.MAX_ENGINE_ELO}, got {self.engine_elo}.",
             )
+
+    @classmethod
+    def snap_engine_elo(cls, elo: int) -> int:
+        """Snap *elo* to the nearest selectable 100-point bucket."""
+        bounded = max(
+            cls.MIN_SELECTABLE_ENGINE_ELO,
+            min(cls.MAX_SELECTABLE_ENGINE_ELO, elo),
+        )
+        relative = bounded - cls.MIN_SELECTABLE_ENGINE_ELO
+        snapped_steps = int(round(relative / cls.ENGINE_ELO_STEP))
+        return cls.MIN_SELECTABLE_ENGINE_ELO + (snapped_steps * cls.ENGINE_ELO_STEP)
+
+    @classmethod
+    def selectable_engine_levels(cls) -> int:
+        """Return how many selectable Elo buckets exist."""
+        return (
+            (cls.MAX_SELECTABLE_ENGINE_ELO - cls.MIN_SELECTABLE_ENGINE_ELO)
+            // cls.ENGINE_ELO_STEP
+        ) + 1
+
+    @classmethod
+    def engine_level_from_elo(cls, elo: int) -> int:
+        """Return a 1-based level index that matches selectable Elo buckets."""
+        snapped = cls.snap_engine_elo(elo)
+        return (
+            (snapped - cls.MIN_SELECTABLE_ENGINE_ELO) // cls.ENGINE_ELO_STEP
+        ) + 1
 
     # -- Persistence ---------------------------------------------------------
 
@@ -813,8 +847,12 @@ class PositionAnalyser:
         return max(0.0, min(1.0, ratio))
 
     def _elo_to_skill_level(self, elo: int) -> int:
-        """Map Elo to Stockfish Skill Level [0, 20]."""
-        return int(round(self._elo_ratio(elo) * 20.0))
+        """Map Elo to Stockfish Skill Level [0, 20] with progressive buckets."""
+        if elo <= AnalysisConfig.MIN_ENGINE_ELO:
+            return 0
+        if elo >= AnalysisConfig.MAX_ENGINE_ELO:
+            return 20
+        return AnalysisConfig.engine_level_from_elo(elo)
 
     def _effective_multipv(self) -> int:
         """Increase candidate pool at low Elo so weaker moves can be selected."""

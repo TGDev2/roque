@@ -184,6 +184,28 @@ class TestAnalysisConfig:
         with pytest.raises(ValueError, match="engine_elo"):
             AnalysisConfig(engine_elo=AnalysisConfig.MAX_ENGINE_ELO + 1)
 
+    def test_selectable_elo_bounds_align_with_step(self) -> None:
+        assert AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO % AnalysisConfig.ENGINE_ELO_STEP == 0
+        assert AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO % AnalysisConfig.ENGINE_ELO_STEP == 0
+        assert AnalysisConfig.MIN_ENGINE_ELO <= AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO
+        assert AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO <= AnalysisConfig.MAX_ENGINE_ELO
+
+    def test_snap_engine_elo_rounds_to_nearest_bucket(self) -> None:
+        assert AnalysisConfig.snap_engine_elo(1749) == 1700
+        assert AnalysisConfig.snap_engine_elo(1751) == 1800
+        assert AnalysisConfig.snap_engine_elo(1200) == AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO
+        assert AnalysisConfig.snap_engine_elo(4000) == AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO
+
+    def test_engine_level_progresses_by_one_per_100_elo(self) -> None:
+        step = AnalysisConfig.ENGINE_ELO_STEP
+        min_elo = AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO
+        max_elo = AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO
+        levels = [
+            AnalysisConfig.engine_level_from_elo(elo)
+            for elo in range(min_elo, max_elo + step, step)
+        ]
+        assert levels == list(range(1, AnalysisConfig.selectable_engine_levels() + 1))
+
 
 # ---------------------------------------------------------------------------
 # AC: Evaluation display and properties
@@ -748,6 +770,22 @@ class TestVariationDetails:
                 },
             )
             analyser.stop()
+
+    def test_skill_level_progresses_with_100_elo_steps(self) -> None:
+        analyser = PositionAnalyser(AnalysisConfig())
+        step = AnalysisConfig.ENGINE_ELO_STEP
+        min_elo = AnalysisConfig.MIN_SELECTABLE_ENGINE_ELO
+        max_elo = AnalysisConfig.MAX_SELECTABLE_ENGINE_ELO
+        skill_levels = [
+            analyser._elo_to_skill_level(elo)
+            for elo in range(min_elo, max_elo + step, step)
+        ]
+        assert skill_levels == list(range(1, AnalysisConfig.selectable_engine_levels() + 1))
+
+    def test_skill_level_uses_full_bounds_outside_selectable_buckets(self) -> None:
+        analyser = PositionAnalyser(AnalysisConfig())
+        assert analyser._elo_to_skill_level(AnalysisConfig.MIN_ENGINE_ELO) == 0
+        assert analyser._elo_to_skill_level(AnalysisConfig.MAX_ENGINE_ELO) == 20
 
 
 # ---------------------------------------------------------------------------
