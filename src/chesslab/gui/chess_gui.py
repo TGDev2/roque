@@ -36,7 +36,15 @@ from chesslab.coach.game_coach import (
     NotYourTurnError,
     PlayerColor,
 )
+from chesslab.capture.screen_capture import ScreenCapture
 from chesslab.gui.board_widget import BoardWidget
+from chesslab.gui.live_observer import (
+    LiveObserver,
+    LiveObserverConfig,
+    ObservationEvent,
+    ObservationEventType,
+    deduce_move_from_fen,
+)
 from chesslab.gui.panels import EvalPanel, MoveHistoryPanel, SuggestionsPanel
 
 logger = logging.getLogger(__name__)
@@ -174,7 +182,13 @@ class ChessGui:
         # Current best move from analysis (UCI string, e.g. "e2e4").
         self._best_move_uci: str | None = None
 
+        # Live observation state.
+        self._observer: LiveObserver | None = None
+        self._observation_queue: queue.Queue[ObservationEvent] = queue.Queue()
+        self._observing: bool = False
+
         # Widgets (populated by _build_window).
+        self._observe_btn: tk.Button | None = None
         self._board_widget: BoardWidget | None = None
         self._eval_panel: EvalPanel | None = None
         self._suggestions_panel: SuggestionsPanel | None = None
@@ -430,7 +444,14 @@ class ChessGui:
             text="\u21a9  Undo",
             command=self._on_undo,
         )
-        undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
+
+        self._observe_btn = _styled_button(
+            btn_frame,
+            text="\u25ce  Observe",
+            command=self._on_toggle_observe,
+        )
+        self._observe_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         # New game button.
         new_game_btn = _styled_button(
@@ -511,6 +532,264 @@ class ChessGui:
             font=("sans-serif", 10), anchor="w",
         )
         self._status_label.pack(side="left", fill="x", expand=True)
+
+    # -- Live observation ----------------------------------------------------
+
+    _KNOWN_THEMES = (
+        "chess.com/green",
+        "chess.com/brown",
+        "chess.com/blue",
+        "chess.com/purple",
+        "chess.com/walnut",
+        "lichess/brown",
+        "lichess/blue",
+        "lichess/green",
+    )
+
+    def _show_observe_dialog(
+        self,
+        parent: tk.Tk,
+    ) -> LiveObserverConfig | None:
+        """Show a dialog to configure live observation settings."""
+        result: list[LiveObserverConfig | None] = [None]
+
+        dialog = tk.Toplevel(parent)
+        dialog.title("Live Observation")
+        dialog.configure(bg=_BG)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=24, pady=20)
+
+        tk.Label(
+            container, text="Live Observation", bg=_BG, fg=_FG,
+            font=("sans-serif", 18, "bold"),
+        ).pack(pady=(0, 16))
+
+        # Monitor selector.
+        monitor_card = tk.Frame(container, bg=_CARD_BORDER)
+        monitor_card.pack(fill="x", pady=(0, 12))
+        monitor_inner = tk.Frame(monitor_card, bg=_BG_SECONDARY)
+        monitor_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            monitor_inner, text="Monitor", bg=_BG_SECONDARY, fg=_FG,
+            font=("sans-serif", 11, "bold"), anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 4))
+
+        try:
+            monitors = ScreenCapture.list_monitors()
+        except Exception as exc:
+            monitors = []
+            logger.warning("Cannot list monitors: %s", exc)
+
+        monitor_labels = [
+            f"Monitor {m.index}: {m.width}x{m.height}" for m in monitors
+        ]
+        if not monitor_labels:
+            monitor_labels = ["No monitors found"]
+
+        monitor_var = tk.StringVar(value=monitor_labels[0])
+        monitor_menu = tk.OptionMenu(monitor_inner, monitor_var, *monitor_labels)
+        monitor_menu.config(
+            bg=_BG_SECONDARY, fg=_FG, font=("sans-serif", 10),
+            highlightthickness=0, relief="flat", activebackground=_BTN_HOVER,
+            activeforeground=_FG,
+        )
+        monitor_menu["menu"].config(
+            bg=_BG_SECONDARY, fg=_FG, activebackground=_ACCENT,
+            activeforeground="#ffffff",
+        )
+        monitor_menu.pack(fill="x", padx=12, pady=(0, 8))
+
+        # Theme selector.
+        theme_card = tk.Frame(container, bg=_CARD_BORDER)
+        theme_card.pack(fill="x", pady=(0, 12))
+        theme_inner = tk.Frame(theme_card, bg=_BG_SECONDARY)
+        theme_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            theme_inner, text="Board Theme", bg=_BG_SECONDARY, fg=_FG,
+            font=("sans-serif", 11, "bold"), anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 4))
+
+        theme_var = tk.StringVar(value=self._KNOWN_THEMES[0])
+        theme_menu = tk.OptionMenu(theme_inner, theme_var, *self._KNOWN_THEMES)
+        theme_menu.config(
+            bg=_BG_SECONDARY, fg=_FG, font=("sans-serif", 10),
+            highlightthickness=0, relief="flat", activebackground=_BTN_HOVER,
+            activeforeground=_FG,
+        )
+        theme_menu["menu"].config(
+            bg=_BG_SECONDARY, fg=_FG, activebackground=_ACCENT,
+            activeforeground="#ffffff",
+        )
+        theme_menu.pack(fill="x", padx=12, pady=(0, 8))
+
+        # Perspective selector.
+        tk.Label(
+            container, text="Board perspective", bg=_BG, fg=_FG_DIM,
+            font=("sans-serif", 10), anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+
+        perspective_var = tk.BooleanVar(value=True)
+
+        persp_frame = tk.Frame(container, bg=_BG)
+        persp_frame.pack(fill="x", pady=(0, 12))
+
+        white_btn = _styled_button(
+            persp_frame,
+            text="\u2654  White",
+            command=lambda: perspective_var.set(True),
+            bg=_BTN_WHITE_BG,
+            fg=_BTN_WHITE_FG,
+            hover_bg=_BTN_WHITE_HOVER,
+            active_bg="#f5ede1",
+            font=("sans-serif", 11, "bold"),
+            pady=8,
+        )
+        white_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        black_btn = _styled_button(
+            persp_frame,
+            text="\u265a  Black",
+            command=lambda: perspective_var.set(False),
+            bg=_BTN_BLACK_BG,
+            fg=_BTN_BLACK_FG,
+            hover_bg=_BTN_BLACK_HOVER,
+            active_bg="#4a4a5c",
+            font=("sans-serif", 11, "bold"),
+            pady=8,
+        )
+        black_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        # OK / Cancel buttons.
+        ok_frame = tk.Frame(container, bg=_BG)
+        ok_frame.pack(fill="x", pady=(4, 0))
+
+        def on_ok() -> None:
+            if not monitors:
+                return
+            selected = monitor_var.get()
+            monitor_index = monitors[monitor_labels.index(selected)].index
+            result[0] = LiveObserverConfig(
+                monitor_index=monitor_index,
+                theme=theme_var.get(),
+                white_perspective=perspective_var.get(),
+            )
+            dialog.destroy()
+
+        ok_btn = _styled_button(
+            ok_frame,
+            text="Start",
+            command=on_ok,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 11, "bold"),
+            pady=8,
+        )
+        ok_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        if not monitors:
+            ok_btn.config(state="disabled")
+
+        cancel_btn = _styled_button(
+            ok_frame,
+            text="Cancel",
+            command=dialog.destroy,
+            font=("sans-serif", 11),
+            pady=8,
+        )
+        cancel_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        # Center dialog.
+        dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        parent.wait_window(dialog)
+        return result[0]
+
+    def _on_toggle_observe(self) -> None:
+        """Toggle live observation mode on/off."""
+        if self._observing:
+            self._stop_observation()
+            return
+
+        assert self._root is not None
+        config = self._show_observe_dialog(self._root)
+        if config is None:
+            return
+
+        # Clear the observation queue before starting.
+        while not self._observation_queue.empty():
+            try:
+                self._observation_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        observer = LiveObserver(config, self._observation_queue)
+        try:
+            observer.start()
+        except Exception as exc:
+            self._set_status(f"Observation failed: {exc}", error=True)
+            logger.error("Failed to start live observer: %s", exc)
+            return
+
+        self._observer = observer
+        self._observing = True
+
+        if self._observe_btn is not None:
+            self._observe_btn.config(text="\u25a0  Stop")
+        if self._move_entry is not None:
+            self._move_entry.config(state="disabled")
+
+        self._set_status("Live observation active")
+        logger.info("Live observation started.")
+
+    def _stop_observation(self) -> None:
+        """Stop live observation and restore manual input."""
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer = None
+        self._observing = False
+
+        if self._observe_btn is not None:
+            self._observe_btn.config(text="\u25ce  Observe")
+        if self._move_entry is not None:
+            self._move_entry.config(state="normal")
+
+        self._update_turn_status()
+        logger.info("Live observation stopped.")
+
+    def _handle_observation_event(self, event: ObservationEvent) -> None:
+        """Process an observation event from the live observer."""
+        assert self._coach is not None
+
+        if event.type is ObservationEventType.MOVE_DETECTED:
+            if event.piece_placement is None:
+                return
+            board = chess.Board(self._coach.current_fen)
+            move = deduce_move_from_fen(board, event.piece_placement)
+            if move is not None:
+                san = board.san(move)
+                self._submit_san(san)
+            else:
+                self._set_status(
+                    "Position changed \u2014 no legal move matches",
+                    error=True,
+                )
+
+        elif event.type is ObservationEventType.ERROR:
+            self._set_status(event.message, error=True)
+
+        elif event.type is ObservationEventType.STOPPED:
+            self._stop_observation()
+            self._set_status(event.message, error=True)
 
     # -- Move handling -------------------------------------------------------
 
@@ -658,6 +937,14 @@ class ChessGui:
         except queue.Empty:
             pass
 
+        if self._observing:
+            try:
+                while True:
+                    obs_event = self._observation_queue.get_nowait()
+                    self._handle_observation_event(obs_event)
+            except queue.Empty:
+                pass
+
         if self._root is not None:
             self._root.after(_POLL_INTERVAL_MS, self._poll_queue)
 
@@ -734,6 +1021,9 @@ class ChessGui:
 
     def _on_new_game(self) -> None:
         """Start a new game."""
+        if self._observing:
+            self._stop_observation()
+
         if self._coach is not None:
             self._coach.stop()
 
@@ -778,6 +1068,8 @@ class ChessGui:
 
     def _on_close(self) -> None:
         """Clean up resources and close the window."""
+        if self._observer is not None:
+            self._observer.stop()
         if self._coach is not None:
             self._coach.stop()
         if self._root is not None:
