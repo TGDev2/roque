@@ -34,7 +34,7 @@ class LiveFrameStatus(enum.Enum):
 class LiveProcessorConfig:
     """Configuration for the live frame processor."""
 
-    theme: str = "green"
+    theme: str = "chess.com-green"
     confidence_threshold: float = 0.60
     white_perspective: bool = True
     active_color: str = "w"

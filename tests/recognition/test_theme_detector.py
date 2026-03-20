@@ -437,3 +437,82 @@ class TestValidation:
         config = ThemeDetectionConfig(themes_file=themes_file)
         with pytest.raises(ThemeConfigError, match="missing 'themes' list"):
             ThemeDetector(config)
+
+
+# ---------------------------------------------------------------------------
+# Multi-theme parametrized detection
+# ---------------------------------------------------------------------------
+
+_ALL_THEME_PARAMS = [
+    ("chess.com-green", (208, 236, 235), (82, 149, 115)),
+    ("chess.com-brown", (181, 217, 240), (99, 136, 181)),
+    ("chess.com-blue", (230, 227, 222), (173, 162, 140)),
+    ("chess.com-purple", (244, 218, 232), (203, 114, 155)),
+    ("chess.com-walnut", (140, 184, 218), (73, 116, 164)),
+    ("lichess-brown", (178, 217, 240), (107, 153, 181)),
+    ("lichess-blue", (222, 228, 227), (187, 175, 136)),
+    ("lichess-green", (221, 255, 255), (102, 166, 134)),
+]
+
+
+class TestMultiThemeDetection:
+    """Verify each registered theme is detected correctly."""
+
+    @pytest.mark.parametrize(
+        "theme_id, light_bgr, dark_bgr",
+        _ALL_THEME_PARAMS,
+        ids=[t[0] for t in _ALL_THEME_PARAMS],
+    )
+    def test_exact_colours_detected(
+        self,
+        theme_id: str,
+        light_bgr: tuple[int, int, int],
+        dark_bgr: tuple[int, int, int],
+    ) -> None:
+        """Board with exact signature colours detects correctly."""
+        squares = _make_full_board(
+            light_bgr=light_bgr, dark_bgr=dark_bgr,
+        )
+        detector = ThemeDetector()
+        result = detector.detect(squares)
+        assert result.matched, f"{theme_id} not matched (dist={result.distance:.1f})"
+        assert result.theme is not None
+        detected_id = f"{result.theme.source}-{result.theme.name}"
+        assert detected_id == theme_id
+
+    @pytest.mark.parametrize(
+        "theme_id, light_bgr, dark_bgr",
+        _ALL_THEME_PARAMS,
+        ids=[t[0] for t in _ALL_THEME_PARAMS],
+    )
+    def test_noisy_detection_at_least_90_percent(
+        self,
+        theme_id: str,
+        light_bgr: tuple[int, int, int],
+        dark_bgr: tuple[int, int, int],
+    ) -> None:
+        """10 boards with Gaussian noise, >= 9 correct."""
+        detector = ThemeDetector()
+        correct = 0
+        for seed in range(10):
+            rng = np.random.RandomState(seed)
+            sigma = rng.uniform(2.0, 5.0)
+            squares = _make_full_board(light_bgr=light_bgr, dark_bgr=dark_bgr)
+            # Add noise to each square.
+            noisy: dict[str, SquareImage] = {}
+            for name, sq in squares.items():
+                noise = rng.normal(0, sigma, sq.image.shape)
+                img = np.clip(
+                    sq.image.astype(np.float32) + noise, 0, 255,
+                ).astype(np.uint8)
+                noisy[name] = SquareImage(
+                    name=name, image=img, file=sq.file, rank=sq.rank,
+                )
+            result = detector.detect(noisy)
+            if (
+                result.matched
+                and result.theme is not None
+                and f"{result.theme.source}-{result.theme.name}" == theme_id
+            ):
+                correct += 1
+        assert correct >= 9, f"{theme_id}: {correct}/10 correct (need >= 9)"

@@ -1,0 +1,31 @@
+{
+  "name": "chess.com-brown",
+  "description": "chess.com-brown theme (synthetic placeholders)",
+  "templates": {
+    "wK_light": "wK_light.png",
+    "wK_dark": "wK_dark.png",
+    "wQ_light": "wQ_light.png",
+    "wQ_dark": "wQ_dark.png",
+    "wR_light": "wR_light.png",
+    "wR_dark": "wR_dark.png",
+    "wB_light": "wB_light.png",
+    "wB_dark": "wB_dark.png",
+    "wN_light": "wN_light.png",
+    "wN_dark": "wN_dark.png",
+    "wP_light": "wP_light.png",
+    "wP_dark": "wP_dark.png",
+    "bK_light": "bK_light.png",
+    "bK_dark": "bK_dark.png",
+    "bQ_light": "bQ_light.png",
+    "bQ_dark": "bQ_dark.png",
+    "bR_light": "bR_light.png",
+    "bR_dark": "bR_dark.png",
+    "bB_light": "bB_light.png",
+    "bB_dark": "bB_dark.png",
+    "bN_light": "bN_light.png",
+    "bN_dark": "bN_dark.png",
+    "bP_light": "bP_light.png",
+    "bP_dark": "bP_dark.png"
+  },
+  "synthetic": true
+}

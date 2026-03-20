@@ -74,7 +74,7 @@ class TemplateLoadError(RecognitionError):
 class RecognitionConfig:
     """Configuration for the piece recognizer."""
 
-    theme: str = "green"
+    theme: str = "chess.com-green"
     confidence_threshold: float = 0.60
     templates_dir: Path | None = None
 
@@ -272,6 +272,14 @@ class PieceRecognizer:
             raise TemplateLoadError(
                 f"Failed to read theme manifest: {manifest_path}.",
             ) from exc
+
+        if manifest.get("synthetic", False):
+            logger.warning(
+                "Theme '%s' uses synthetic templates — recognition accuracy "
+                "will be low. Run 'python -m chesslab.extract' with a real "
+                "screenshot to generate production-quality templates.",
+                theme,
+            )
 
         templates_map = manifest.get("templates")
         if not isinstance(templates_map, dict) or not templates_map:

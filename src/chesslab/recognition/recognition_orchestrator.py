@@ -205,5 +205,5 @@ class RecognitionOrchestrator:
     @staticmethod
     def _normalize_theme_id(theme_id: str) -> str:
         """Normalize user/theme-detector IDs to a template directory name."""
-        normalized = theme_id.split("/", 1)[-1].strip()
+        normalized = theme_id.replace("/", "-").strip()
         return normalized

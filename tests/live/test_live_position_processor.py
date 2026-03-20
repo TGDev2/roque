@@ -147,7 +147,7 @@ def test_process_frame_blocks_uncertain_positions_by_default() -> None:
             status=RecognitionFlowStatus.POSITION_UNCERTAIN,
             suspended=True,
             message="Recognition confidence is too low.",
-            selected_theme="green",
+            selected_theme="chess.com-green",
             available_themes=(),
             theme_detection=None,
             recognition=recognition,
@@ -165,7 +165,7 @@ def test_process_frame_blocks_uncertain_positions_by_default() -> None:
 
     assert result.status is LiveFrameStatus.POSITION_UNCERTAIN
     assert result.uncertain_squares == ("e4", "e5")
-    assert orchestrator.manual_theme_calls == ["green"]
+    assert orchestrator.manual_theme_calls == ["chess.com-green"]
 
 
 def test_process_frame_marks_fen_changes_only_once() -> None:
@@ -181,7 +181,7 @@ def test_process_frame_marks_fen_changes_only_once() -> None:
             status=RecognitionFlowStatus.READY,
             suspended=False,
             message="ok",
-            selected_theme="green",
+            selected_theme="chess.com-green",
             available_themes=(),
             theme_detection=None,
             recognition=recognition,
@@ -230,7 +230,7 @@ def test_process_frame_maps_invalid_position_error() -> None:
                 status=RecognitionFlowStatus.READY,
                 suspended=False,
                 message="ok",
-                selected_theme="green",
+                selected_theme="chess.com-green",
                 available_themes=(),
                 theme_detection=None,
                 recognition=recognition,

@@ -36,8 +36,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--theme",
-        default="green",
-        help="Manual theme ID (default: green).",
+        default="chess.com-green",
+        help="Manual theme ID (default: chess.com-green).",
     )
     parser.add_argument(
         "--black-perspective",

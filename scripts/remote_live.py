@@ -34,7 +34,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0).")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
-    parser.add_argument("--theme", default="green", help="Manual theme ID (default: green).")
+    parser.add_argument("--theme", default="chess.com-green", help="Manual theme ID (default: chess.com-green).")
     parser.add_argument(
         "--confidence-threshold",
         type=float,

@@ -1,4 +1,9 @@
-"""Extract a complete template set from a starting-position screenshot."""
+"""Extract a complete template set from a starting-position screenshot.
+
+.. deprecated::
+    Use ``python -m chesslab.extract`` instead.  This script is kept for
+    backwards compatibility and delegates to the new module.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-
-import cv2
-import numpy as np
+import warnings
 
 # Allow running as `python scripts/extract_templates_auto.py` without install.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,12 +19,15 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import cv2
+import numpy as np
+
 from chesslab.detection.board_detector import BoardDetector
 from chesslab.splitting.board_splitter import BoardSplitter, SquareImage
 from chesslab.splitting.square_color import square_background
 
 DEFAULT_IMAGE = Path("scripts/data/test_board.png")
-DEFAULT_OUTPUT = Path("src/chesslab/recognition/templates/green")
+DEFAULT_OUTPUT = Path("src/chesslab/recognition/templates/chess.com-green")
 BACKGROUNDS = ("light", "dark")
 PIECES = (
     "wK", "wQ", "wR", "wB", "wN", "wP",
@@ -61,8 +67,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--theme-name",
-        default="green",
-        help="Theme name written to theme.json (default: green).",
+        default="chess.com-green",
+        help="Theme name written to theme.json (default: chess.com-green).",
     )
     return parser.parse_args()
 
@@ -136,6 +142,12 @@ def _expected_keys() -> set[str]:
 
 
 def main() -> None:
+    warnings.warn(
+        "extract_templates_auto.py is deprecated. "
+        "Use 'python -m chesslab.extract' instead.",
+        DeprecationWarning,
+        stacklevel=1,
+    )
     args = _parse_args()
     image_path = Path(args.image)
     output_dir = Path(args.output_dir)
