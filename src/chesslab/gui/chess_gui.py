@@ -49,8 +49,8 @@ from chesslab.gui.live_observer import (
     LiveObserverConfig,
     ObservationEvent,
     ObservationEventType,
-    deduce_move_from_fen,
 )
+from chesslab.live.move_deduction import deduce_move_from_fen
 from chesslab.gui.panels import (
     EvalPanel,
     GameSummaryPanel,
@@ -906,6 +906,12 @@ class ChessGui:
         assert self._coach is not None
 
         if event.type is ObservationEventType.MOVE_DETECTED:
+            # If game tracking provided a move, use it directly.
+            if event.tracking is not None and event.tracking.move_san is not None:
+                self._submit_san(event.tracking.move_san)
+                return
+
+            # Fallback: deduce move from piece placement (no tracker).
             if event.piece_placement is None:
                 return
             board = chess.Board(self._coach.current_fen)
@@ -918,6 +924,11 @@ class ChessGui:
                     "Position changed \u2014 no legal move matches",
                     error=True,
                 )
+
+        elif event.type is ObservationEventType.NEW_GAME:
+            self._set_status(
+                event.tracking.message if event.tracking else "New game detected.",
+            )
 
         elif event.type is ObservationEventType.ERROR:
             self._set_status(event.message, error=True)

@@ -1,6 +1,7 @@
-"""Tests for the LiveObserver and move deduction logic.
+"""Tests for the LiveObserver lifecycle and event pipeline.
 
 All tests are headless — no mss, no tkinter, no Stockfish required.
+Move deduction tests have been moved to tests/live/test_move_deduction.py.
 """
 
 from __future__ import annotations
@@ -18,135 +19,9 @@ from chesslab.gui.live_observer import (
     LiveObserverConfig,
     ObservationEvent,
     ObservationEventType,
-    deduce_move_from_fen,
 )
 from chesslab.live.live_position_processor import LiveFrameResult, LiveFrameStatus
 from chesslab.monitoring.position_watcher import PositionChangeEvent
-
-
-# ---------------------------------------------------------------------------
-# deduce_move_from_fen
-# ---------------------------------------------------------------------------
-
-
-class TestDeduceMoveFromFen:
-    """Unit tests for the pure move deduction function."""
-
-    def test_e2e4_from_start(self) -> None:
-        board = chess.Board()
-        # Position after 1. e4
-        board_copy = board.copy()
-        board_copy.push_san("e4")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move == chess.Move.from_uci("e2e4")
-
-    def test_nf3_from_start(self) -> None:
-        board = chess.Board()
-        board_copy = board.copy()
-        board_copy.push_san("Nf3")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move == chess.Move.from_uci("g1f3")
-
-    def test_same_position_returns_none(self) -> None:
-        board = chess.Board()
-        placement = board.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is None
-
-    def test_impossible_placement_returns_none(self) -> None:
-        board = chess.Board()
-        # An impossible placement (empty board)
-        placement = "8/8/8/8/8/8/8/8"
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is None
-
-    def test_castling_kingside_white(self) -> None:
-        # Position where white can castle kingside.
-        board = chess.Board("r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-        board_copy = board.copy()
-        board_copy.push_san("O-O")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move == chess.Move.from_uci("e1g1")
-
-    def test_castling_queenside_black(self) -> None:
-        board = chess.Board("r3kbnr/pppqpppp/2n5/3p1b2/3P1B2/2N5/PPPQPPPP/R3KBNR b KQkq - 6 4")
-        board_copy = board.copy()
-        board_copy.push_san("O-O-O")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move == chess.Move.from_uci("e8c8")
-
-    def test_promotion_to_queen(self) -> None:
-        # White pawn on a7, black king away from promotion square.
-        board = chess.Board("8/P3k3/8/8/8/8/8/4K3 w - - 0 1")
-        board_copy = board.copy()
-        board_copy.push_san("a8=Q")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move.promotion == chess.QUEEN
-        assert move.from_square == chess.A7
-        assert move.to_square == chess.A8
-
-    def test_promotion_to_knight(self) -> None:
-        # White pawn on a7, promote to knight.
-        board = chess.Board("8/P3k3/8/8/8/8/8/4K3 w - - 0 1")
-        board_copy = board.copy()
-        board_copy.push_san("a8=N")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move.promotion == chess.KNIGHT
-
-    def test_en_passant(self) -> None:
-        # White pawn on e5, black pawn just played d7-d5.
-        board = chess.Board("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3")
-        board_copy = board.copy()
-        board_copy.push_san("exd6")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert move == chess.Move.from_uci("e5d6")
-
-    def test_capture(self) -> None:
-        board = chess.Board()
-        # Play 1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6?? — white to move, Scholar's mate
-        for san in ("e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6"):
-            board.push_san(san)
-
-        board_copy = board.copy()
-        board_copy.push_san("Qxf7#")
-        placement = board_copy.fen().split(" ", 1)[0]
-
-        move = deduce_move_from_fen(board, placement)
-
-        assert move is not None
-        assert board.san(move) == "Qxf7#"
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ from chesslab.gui.live_observer import (
     LiveObserverConfig,
     ObservationEvent,
     ObservationEventType,
+    deduce_move_from_fen,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "LiveObserverConfig",
     "ObservationEvent",
     "ObservationEventType",
+    "deduce_move_from_fen",
 ]

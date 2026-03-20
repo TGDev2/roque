@@ -23,15 +23,20 @@ import queue
 import threading
 from dataclasses import dataclass
 
-import chess
 from numpy.typing import NDArray
 
 from chesslab.capture.screen_capture import CaptureConfig, ScreenCapture
+from chesslab.live.live_game_tracker import (
+    GameTrackingEvent,
+    GameTrackingEventType,
+    LiveGameTracker,
+)
 from chesslab.live.live_position_processor import (
     LiveFrameStatus,
     LivePositionProcessor,
     LiveProcessorConfig,
 )
+from chesslab.live.move_deduction import deduce_move_from_fen
 from chesslab.monitoring.position_watcher import (
     PositionChangeEvent,
     PositionWatcher,
@@ -62,6 +67,9 @@ class LiveObserverConfig:
         Milliseconds between screen captures.
     debounce_ms:
         Debounce delay before firing a position change event.
+    enable_game_tracking:
+        When ``True``, the observer maintains a :class:`LiveGameTracker`
+        that tracks moves and game state automatically.
     """
 
     monitor_index: int = 1
@@ -69,6 +77,7 @@ class LiveObserverConfig:
     white_perspective: bool = True
     capture_interval_ms: int = 500
     debounce_ms: int = 300
+    enable_game_tracking: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +89,7 @@ class ObservationEventType(enum.Enum):
     """Type of event emitted by the live observer."""
 
     MOVE_DETECTED = "move_detected"
+    NEW_GAME = "new_game"
     ERROR = "error"
     STOPPED = "stopped"
 
@@ -98,49 +108,26 @@ class ObservationEvent:
         First FEN field (piece placement only) for move deduction.
     message:
         Human-readable description of the event.
+    tracking:
+        When game tracking is enabled, the detailed tracking event
+        produced by :class:`LiveGameTracker`.
     """
 
     type: ObservationEventType
     fen: str | None = None
     piece_placement: str | None = None
     message: str = ""
+    tracking: GameTrackingEvent | None = None
 
 
-# ---------------------------------------------------------------------------
-# Move deduction
-# ---------------------------------------------------------------------------
-
-
-def deduce_move_from_fen(
-    board: chess.Board,
-    detected_placement: str,
-) -> chess.Move | None:
-    """Find the legal move that produces *detected_placement*.
-
-    Iterates all legal moves on *board*, pushes each on a copy, and
-    compares the resulting piece-placement field (first FEN token) with
-    *detected_placement*.  Returns the matching :class:`chess.Move` or
-    ``None`` if no legal move produces the detected position.
-
-    Only the piece-placement portion of the FEN is compared because the
-    CV pipeline cannot reliably determine active colour, castling rights,
-    or en-passant state.
-
-    Parameters
-    ----------
-    board:
-        The current board state (from the coach).
-    detected_placement:
-        The piece-placement field extracted from the detected FEN
-        (e.g. ``"rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR"``).
-    """
-    for move in board.legal_moves:
-        board.push(move)
-        placement = board.fen().split(" ", 1)[0]
-        board.pop()
-        if placement == detected_placement:
-            return move
-    return None
+# Re-export for backwards compatibility (moved to chesslab.live.move_deduction).
+__all__ = [
+    "deduce_move_from_fen",
+    "LiveObserver",
+    "LiveObserverConfig",
+    "ObservationEvent",
+    "ObservationEventType",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +151,7 @@ class LiveObserver:
         screen_capture: ScreenCapture | None = None,
         processor: LivePositionProcessor | None = None,
         watcher: PositionWatcher | None = None,
+        tracker: LiveGameTracker | None = None,
     ) -> None:
         self._config = config
         self._event_queue = event_queue
@@ -184,6 +172,13 @@ class LiveObserver:
             PositionWatcherConfig(debounce_ms=config.debounce_ms),
         )
 
+        if tracker is not None:
+            self._tracker: LiveGameTracker | None = tracker
+        elif config.enable_game_tracking:
+            self._tracker = LiveGameTracker()
+        else:
+            self._tracker = None
+
         self._running = False
         self._lock = threading.Lock()
 
@@ -191,6 +186,11 @@ class LiveObserver:
     def is_running(self) -> bool:
         """``True`` if the observer is actively capturing."""
         return self._running
+
+    @property
+    def tracker(self) -> LiveGameTracker | None:
+        """The game tracker, if tracking is enabled."""
+        return self._tracker
 
     def start(self) -> None:
         """Start screen capture and position monitoring.
@@ -211,9 +211,10 @@ class LiveObserver:
             self._running = True
 
         logger.info(
-            "LiveObserver started: monitor=%d theme=%s",
+            "LiveObserver started: monitor=%d theme=%s tracking=%s",
             self._config.monitor_index,
             self._config.theme,
+            self._tracker is not None,
         )
 
     def stop(self) -> None:
@@ -256,9 +257,45 @@ class LiveObserver:
 
         placement = event.current_fen.split(" ", 1)[0]
 
+        if self._tracker is not None:
+            self._on_tracked_position_change(placement, event)
+        else:
+            self._event_queue.put(ObservationEvent(
+                type=ObservationEventType.MOVE_DETECTED,
+                fen=event.current_fen,
+                piece_placement=placement,
+                message=f"Position change detected ({event.elapsed_ms:.0f} ms)",
+            ))
+
+    def _on_tracked_position_change(
+        self,
+        placement: str,
+        event: PositionChangeEvent,
+    ) -> None:
+        """Delegate position change to the game tracker."""
+        assert self._tracker is not None
+
+        tracking_event = self._tracker.update(placement)
+
+        if tracking_event.type is GameTrackingEventType.NO_CHANGE:
+            # Tracker absorbed the event (e.g. awaiting confirmation).
+            return
+
+        if tracking_event.type is GameTrackingEventType.MOVE:
+            obs_type = ObservationEventType.MOVE_DETECTED
+        elif tracking_event.type in (
+            GameTrackingEventType.NEW_GAME_DETECTED,
+            GameTrackingEventType.POSITION_RESET,
+        ):
+            obs_type = ObservationEventType.NEW_GAME
+        else:
+            # GAME_STARTED — enqueue as MOVE_DETECTED (initial position).
+            obs_type = ObservationEventType.MOVE_DETECTED
+
         self._event_queue.put(ObservationEvent(
-            type=ObservationEventType.MOVE_DETECTED,
-            fen=event.current_fen,
+            type=obs_type,
+            fen=tracking_event.fen,
             piece_placement=placement,
-            message=f"Position change detected ({event.elapsed_ms:.0f} ms)",
+            message=tracking_event.message,
+            tracking=tracking_event,
         ))
