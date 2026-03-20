@@ -1,53 +1,55 @@
-# ChessLab — Analyse strategique et backlog prioritaire
+# ChessLab --- Analyse strategique et backlog prioritaire (v2)
 
 ## 1. Comprehension du projet
 
 ### Proposition de valeur
 
-ChessLab est une plateforme d'analyse et d'entrainement aux echecs qui combine vision par ordinateur (capture d'ecran, detection d'echiquier, reconnaissance de pieces) et analyse moteur (Stockfish via UCI). Le projet adresse un besoin reel : permettre a un joueur d'echecs d'obtenir une analyse en temps reel de ses parties, qu'elles soient jouees sur un site tiers (chess.com, lichess) ou directement dans l'interface integree.
-
-Le produit s'adresse a un joueur d'echecs intermediaire a avance qui souhaite progresser en comprenant mieux ses positions en temps reel, et non simplement apres coup.
+ChessLab est une plateforme de coaching echiqueen qui combine vision par ordinateur et analyse Stockfish pour offrir une experience unique : observer automatiquement une partie jouee sur un site tiers (chess.com, lichess) via capture d'ecran, l'analyser en temps reel, la sauvegarder, puis la revoir avec une classification pedagogique de chaque coup. Le projet adresse un joueur intermediaire a avance (1200-2000 Elo) qui souhaite progresser en comprenant ses erreurs, aussi bien en temps reel qu'apres la partie.
 
 ### Etat de maturite
 
-**Version 0.1.0 — MVP fonctionnel.** Le projet contient 11 modules (environ 6 600 lignes de production, 6 400 lignes de tests), une architecture en pipeline propre, des types annotes partout, et une couverture de tests serieuse. La qualite d'ingenierie est nettement superieure a ce qu'on attend d'un v0.1 : hierarchies d'erreurs typees, dataclasses immutables, gestion du threading, separation de responsabilites claire.
+**Version 0.1.0 --- MVP complet.** Le projet contient 16 modules (~9 800 lignes de production, ~8 100 lignes de tests, 547 tests passants). Les trois axes strategiques identifies dans la premiere analyse ont tous ete realises :
+
+1. **Detection automatique des coups** --- Le mode observation live integre le pipeline CV complet dans le GUI. La capture d'ecran alimente automatiquement le coaching Stockfish sans saisie manuelle.
+2. **Persistance des parties** --- Sauvegarde automatique, export/import PGN, panneau de parties recentes, en-tetes standards avec Elo moteur.
+3. **Revue post-partie** --- Module `review` complet avec classification des coups (excellent/bon/imprecision/erreur/gaffe/force), detection de phases (ouverture/milieu/finale), resume statistique, navigation par moments critiques.
+
+Le projet a franchi un cap significatif : il n'est plus un assemblage de modules techniques independants mais un produit coherent avec une boucle complete capturer-analyser-sauvegarder-revoir.
 
 ### Forces visibles
 
-- **Architecture composable.** Chaque module (capture, detection, splitting, reconnaissance, FEN, analyse) est utilisable independamment et testable en isolation. Le pipeline se compose naturellement.
-- **Deux modes d'utilisation distincts et complementaires.** Le pipeline live (capture ecran → detection → reconnaissance → FEN → analyse → overlay) et le GUI interactif (plateau cliquable + coaching Stockfish avec Elo configurable).
-- **Robustesse technique.** Resolution multi-strategie de Stockfish (variable d'environnement, PATH, chemins fallback), detection de positions terminales avant appel moteur, gestion cooperative du threading, debounce sur le monitoring de positions.
-- **Base de tests solide.** Tests unitaires avec mocks synthetiques (pas de dependance a des screenshots reels ni a un binaire Stockfish en CI). 17 fichiers de tests couvrant chaque module.
+- **Boucle utilisateur complete.** Le chemin capture → detection → reconnaissance → analyse → coaching → sauvegarde → revue fonctionne de bout en bout. C'est rare pour un projet a ce stade de maturite.
+- **Qualite d'ingenierie constante.** Les nouveaux modules (review, persistence, panels de revue) maintiennent le meme niveau que le code initial : dataclasses immutables, hierarchies d'erreurs typees, annulation cooperative via `threading.Event`, separation stricte entre logique metier et affichage.
+- **Architecture GUI bien structuree.** Les panneaux sont des widgets d'affichage purs sans logique metier. Le basculement play/review dans `chess_gui.py` est gere par un flag d'etat propre. Les workers Stockfish tournent en threads daemon avec communication par file d'attente.
+- **Couverture de tests des nouveaux modules.** Le module `review` est teste des sa creation (25+ tests couvrant classification, phases, coups forces, mat perdu, annulation).
 
 ### Limites actuelles
 
-1. **Le GUI et le pipeline live sont deconnectes.** C'est la fracture centrale du projet. D'un cote, une chaine complete de vision par ordinateur capable de lire une position depuis un ecran. De l'autre, un GUI ou l'utilisateur doit saisir manuellement les coups de l'adversaire. Les deux moities du projet ne communiquent pas. Cela reduit considerablement la valeur du travail de vision par ordinateur pour l'utilisateur final du GUI.
+1. **Reconnaissance limitee a un seul theme.** Les templates de pieces n'existent que pour le theme "green". Sept autres themes ont des signatures de couleur (detection automatique) mais aucun template operationnel. Cela signifie que le mode observation live --- la fonctionnalite differenciante du projet --- ne fonctionne que si l'utilisateur configure son site d'echecs sur le theme vert. C'est un goulet d'etranglement majeur entre la promesse du produit et sa portee reelle.
 
-2. **Aucune persistance des parties.** Les parties jouees dans le GUI disparaissent a la fermeture. Pas d'export PGN, pas d'historique. La valeur d'entrainement est ephemere — un joueur ne peut pas revenir sur ses erreurs plus tard.
+2. **Les revues de parties sont ephemeres.** L'analyse post-partie (qui prend 2 a 4 minutes pour une partie typique de 40 coups a profondeur 16) n'est pas sauvegardee. Fermer l'application ou revenir en mode jeu perd tout le travail d'analyse. Revoir la meme partie impose de relancer l'analyse complete. Pour un outil de progression, c'est une friction significative : le joueur devrait pouvoir revenir sur ses revues anterieures sans attendre.
 
-3. **Pas de mode revue post-partie.** L'analyse est uniquement en temps reel. Or, la progression aux echecs passe majoritairement par la revue de ses parties apres coup (identification des inaccuracies, erreurs, gaffes). Le produit genere de l'analyse mais ne capitalise pas dessus.
-
-4. **Reconnaissance limitee a un seul theme operationnel.** Les templates de pieces n'existent que pour le theme "green". Les 7 autres themes ont des signatures de couleur mais pas de templates. Cela limite l'utilisation du pipeline live aux sites configurant ce theme precis.
+3. **Le coaching manque de structure pedagogique.** Le mode coaching permet de jouer contre Stockfish a un Elo configurable avec analyse en temps reel, mais chaque partie est une partie libre sans objectif. Il n'y a pas de repertoire d'ouvertures, pas de positions thematiques, pas de progression structuree. Le joueur intermediaire qui veut travailler une ouverture specifique ou un type de finale n'a aucun outil dedie pour cela.
 
 ### Hypotheses prises
 
-- **Utilisateur cible.** Joueur intermediaire (1200-2000 Elo) qui joue regulierement en ligne et souhaite un outil de coaching en temps reel. Hypothese basee sur le systeme d'Elo configurable (1320-3190) et le mode coaching avec suggestions de coups.
-- **Environnement d'utilisation.** Principalement Linux (X11) d'apres l'overlay click-through et les scripts de capture. Le workflow Windows→Ubuntu via HTTP suggere un utilisateur technique a l'aise avec une configuration multi-machine.
-- **Usage du pipeline live.** Destine a observer des parties jouees sur un navigateur (chess.com/lichess), pas a jouer directement. Le GUI interactif couvre le cas "jouer contre le moteur".
+- **Utilisateur type.** Joueur regulier sur chess.com ou lichess, Elo 1200-2000, qui joue plusieurs parties par semaine et souhaite identifier ses patterns d'erreurs recurrents. Hypothese basee sur le systeme d'Elo configurable, les 8 themes couvrant les deux plateformes majeures, et la classification pedagogique des coups.
+- **Environnement.** Principalement Linux (X11/Wayland). Le workflow de capture d'ecran via mss et l'overlay suggere un usage desktop.
+- **Usage des revues.** Un joueur qui revoit ses parties le fait plusieurs fois --- d'abord a chaud apres la partie, puis en revisant ses erreurs recurrentes sur un corpus de parties. La persistance des revues est donc un besoin reel, pas un confort marginal.
 
 ---
 
 ## 2. Vision pour la suite
 
-Le projet a atteint un MVP ou les deux grandes chaines de valeur (vision par ordinateur et coaching interactif) fonctionnent en isolation. **Le prochain cap logique est de fusionner ces deux chaines en une experience utilisateur unifiee, puis de capitaliser sur les donnees generees pour offrir une valeur durable a l'utilisateur.**
+Le projet a complete sa boucle fonctionnelle fondamentale. **Le prochain cap n'est plus de construire des fonctionnalites manquantes, mais d'elargir la portee du produit et d'approfondir la valeur pedagogique.**
 
-Concretement, trois axes se dessinent par ordre de priorite :
+Trois axes se dessinent par ordre de priorite :
 
-1. **Connecter la perception au coaching** — faire en sorte que le pipeline de vision par ordinateur alimente automatiquement le GUI, eliminant la saisie manuelle des coups adverses.
-2. **Rendre la valeur durable** — persister les parties et permettre l'export PGN pour que le travail d'analyse ne soit pas perdu.
-3. **Amplifier la valeur pedagogique** — proposer une revue post-partie avec classification des erreurs, transformant un outil d'analyse en temps reel en un veritable outil de progression.
+1. **Elargir la couverture de reconnaissance** --- tant que le pipeline live ne fonctionne qu'avec un seul theme, la fonctionnalite differenciante du projet reste theorique pour la majorite des utilisateurs potentiels. C'est un plafond de verre a briser avant toute autre evolution.
+2. **Rendre les revues durables** --- persister les analyses post-partie pour que la valeur pedagogique survive a la session. C'est le pendant "revue" de ce que la persistance PGN a fait pour les parties : transformer un resultat ephemere en actif reutilisable.
+3. **Structurer l'entrainement** --- introduire un mode d'entrainement cible par position ou par ouverture pour passer d'un outil d'analyse passive a un outil d'apprentissage actif.
 
-Ces trois axes s'enchainent logiquement : le premier augmente l'utilisation, le deuxieme capture la valeur generee, le troisieme l'exploite pour la progression du joueur.
+Ces axes s'enchainent logiquement : le premier maximise l'acquisition de parties analysables, le deuxieme capitalise sur les analyses produites, le troisieme exploite le corpus pour un entrainement cible.
 
 ---
 
@@ -55,149 +57,149 @@ Ces trois axes s'enchainent logiquement : le premier augmente l'utilisation, le 
 
 ---
 
-### Item 1 — Detection automatique des coups adverses via capture d'ecran dans le GUI
+### Item 1 --- Pipeline de generation de templates multi-themes
 
-**Nature :** Nouvelle fonctionnalite — integration de modules existants.
+**Nature :** Amelioration d'une fonctionnalite existante --- extension de la reconnaissance de pieces.
 
 **Probleme adresse**
 
-Aujourd'hui, lorsqu'un utilisateur suit une partie sur chess.com ou lichess, il doit saisir manuellement chaque coup adverse dans le GUI pour obtenir l'analyse Stockfish. Cette friction rend le workflow live pratiquement inutilisable : le temps de saisir le coup, la position a deja evolue. Par ailleurs, tout le travail de vision par ordinateur (modules `capture`, `detection`, `splitting`, `recognition`, `fen`, `monitoring`, `live`) n'est accessible qu'a travers un script serveur HTTP ou une CLI, jamais depuis l'interface graphique.
+Le mode observation live est la fonctionnalite qui differencie ChessLab de tout autre GUI Stockfish. Mais cette fonctionnalite repose sur la reconnaissance de pieces par template matching, et les templates n'existent que pour un seul theme ("green") sur les huit detectes. Un utilisateur de chess.com avec le theme "wood" ou un joueur lichess avec le theme "blue" ne peut tout simplement pas utiliser le mode live. Le systeme de detection de theme fonctionne (il identifie correctement le theme utilise), mais il ne peut rien en faire faute de templates correspondants. C'est comme avoir un traducteur qui reconnait la langue parlee mais ne connait qu'une seule langue.
 
 **Valeur attendue**
 
-- Elimine la friction principale du workflow d'analyse live.
-- Transforme le GUI en un outil d'assistance en temps reel reellement utilisable pendant une partie en ligne.
-- Donne une raison d'etre concrete a 6 des 11 modules du projet, qui aujourd'hui n'ont aucun chemin utilisateur fluide.
-- Differencie ChessLab d'un simple wrapper Stockfish.
+- Multiplie par huit la base d'utilisateurs potentiels du mode observation live.
+- Rentabilise pleinement les six modules du pipeline de vision (capture, detection, splitting, reconnaissance, monitoring, live) qui representent ~40% du code de production.
+- Elimine le principal frein a l'adoption : l'obligation de changer le theme de son site d'echecs pour utiliser ChessLab.
+- Le script `_generate_placeholders.py` et l'existence de `extract_templates_auto.py` suggerent que ce besoin a deja ete anticipe dans l'architecture.
 
 **User story**
 
-> En tant que joueur d'echecs en ligne, je veux que ChessLab detecte automatiquement les coups joues sur mon ecran, afin d'obtenir des suggestions Stockfish en temps reel sans avoir a saisir les coups manuellement.
+> En tant que joueur utilisant chess.com ou lichess avec mon theme prefere, je veux que ChessLab reconnaisse les pieces sur mon echiquier quel que soit le theme visuel, afin de pouvoir utiliser le mode observation live sans changer mes preferences de site.
 
 **Criteres d'acceptation**
 
-1. Le GUI propose un mode "Observation live" activable depuis l'interface (en plus du mode interactif actuel).
-2. En mode observation, le systeme capture periodiquement l'ecran, detecte l'echiquier, reconnait la position et genere le FEN.
-3. Lorsqu'un changement de position est detecte (via le module `monitoring`), le coup est automatiquement identifie et soumis au `GameCoach`.
-4. L'analyse Stockfish (evaluation, variations, meilleur coup) se met a jour automatiquement dans les panneaux lateraux.
-5. L'utilisateur peut selectionner la region d'ecran a surveiller (pour eviter les faux positifs sur d'autres fenetres).
-6. L'utilisateur peut choisir le theme de l'echiquier distant parmi les themes supportes.
-7. Le mode observation peut etre arrete et repris sans perdre l'historique de la partie en cours.
-8. En cas d'echec de detection (echiquier non trouve, theme non reconnu), un message clair est affiche dans la barre de statut sans interrompre le monitoring.
+1. Au moins cinq themes sur les huit declares dans `themes.json` disposent de templates operationnels (les cinq chess.com ou les trois lichess au minimum).
+2. Un mecanisme de generation ou d'extraction de templates a partir d'une capture d'ecran d'une position connue est disponible et documente.
+3. La reconnaissance de pieces avec les nouveaux templates atteint un taux de precision >= 95% sur une position de depart standard et >= 90% sur des positions de milieu de partie, mesure sur au moins trois themes differents.
+4. Le systeme de detection de theme selectionne automatiquement le bon jeu de templates sans intervention utilisateur.
+5. En cas de theme non supporte, un message explicite indique les themes disponibles et propose une procedure d'ajout.
+6. Les templates generes sont inclus dans le package et ne necessitent aucune etape manuelle de la part de l'utilisateur final.
 
-**Impact :** Tres eleve — c'est la fonctionnalite qui donne sa coherence au projet entier.
+**Impact :** Tres eleve --- c'est le verrou qui empeche la fonctionnalite phare du produit d'atteindre son public.
 
-**Complexite :** Moyenne — les modules existent deja, l'effort porte sur l'integration dans le GUI, la gestion du thread de capture et la deduction du coup joue a partir du delta de FEN.
+**Complexite :** Moyenne --- l'architecture de reconnaissance est deja generique (theme-based dispatch). L'effort porte sur la creation d'un outil d'extraction fiable et la generation/validation des templates pour chaque theme. Le script `extract_templates_auto.py` existant est un point de depart.
 
-**Raison de la priorite :** C'est le pont entre les deux moities du projet. Sans cette integration, la chaine de vision par ordinateur et le GUI restent deux produits separes. C'est aussi la fonctionnalite qui differencie ChessLab d'un simple GUI Stockfish dont il existe des dizaines d'alternatives.
+**Raison de la priorite :** Sans couverture multi-themes, le mode observation live --- qui a necessite l'integration de six modules et constitue la proposition de valeur unique du projet --- ne fonctionne que pour une fraction des utilisateurs. C'est un multiplicateur d'impact a cout modere, le meilleur ratio valeur/effort du backlog.
 
 **Risques et points de vigilance**
 
-- La deduction du coup a partir de deux FEN consecutifs n'est pas triviale (promotions, roques, prises en passant). `python-chess` peut resoudre cela en comparant les positions legales.
-- La fiabilite de la reconnaissance de pieces est critique : une erreur de reconnaissance genere un FEN invalide et casse la chaine. Il faudra gerer gracieusement les frames incertaines (les ignorer plutot que soumettre un coup faux).
-- La performance de capture + detection + reconnaissance doit rester sous le seuil de latence acceptable (< 2 secondes par cycle) pour que l'experience soit fluide.
-- Le nombre de themes avec templates operationnels (actuellement 1 seul : "green") limite l'applicabilite. Un mecanisme de generation ou d'extraction de templates serait un complement utile a moyen terme (le script `extract_templates_auto.py` existe deja).
+- La qualite des templates extraits depend de la resolution d'ecran et du rendu du navigateur. Prevoir une validation automatique (tester les templates extraits contre une position connue).
+- Certains themes ont des pieces 3D ou des effets visuels (ombres, reflets) qui compliquent le template matching. Identifier ces cas et les documenter comme limitations connues plutot que de tenter un support partiel.
+- La taille du package augmentera (24 templates x N themes). Impact negligeable (quelques centaines de Ko au total) mais a surveiller.
+- Le theme "brown" de lichess utilise des pieces similaires au "green" de chess.com : verifier qu'il n'y a pas de confusion de templates entre plateformes.
 
 ---
 
-### Item 2 — Persistance des parties et export PGN
+### Item 2 --- Persistance des revues de parties
 
-**Nature :** Nouvelle fonctionnalite — persistance et interoperabilite.
+**Nature :** Amelioration d'une fonctionnalite existante --- persistance et reutilisabilite.
 
 **Probleme adresse**
 
-Chaque partie jouee ou observee dans ChessLab disparait a la fermeture de l'application. L'utilisateur ne peut ni revoir ses parties, ni les partager, ni les importer dans un autre outil. Pour un outil de progression, c'est une limitation majeure : la valeur de l'analyse n'existe que dans l'instant. Le format PGN est le standard universel — tout outil d'echecs (lichess, chess.com, Chessbase, SCID) peut l'importer.
+La revue post-partie est l'un des piliers pedagogiques de ChessLab. Mais aujourd'hui, chaque revue est calculee a la volee : 2 a 4 minutes d'analyse Stockfish pour une partie de 40 coups, puis le resultat disparait a la fermeture ou au retour en mode jeu. Un joueur qui veut revoir ses cinq dernieres parties pour identifier ses patterns d'erreurs doit relancer cinq analyses completes. C'est un obstacle concret a l'usage prevu du produit : la revue iterative et l'identification de tendances sur un corpus de parties.
+
+Par ailleurs, l'absence de persistance empeche toute fonctionnalite future d'agregation (statistiques de progression, taux d'erreur par phase, tendances sur N parties) qui serait naturellement alimentee par un historique de revues sauvegardees.
 
 **Valeur attendue**
 
-- Les parties jouees deviennent un actif durable pour l'utilisateur.
-- L'export PGN ouvre l'interoperabilite avec l'ecosysteme echiqueen existant.
-- La persistence est un prerequis pour la revue post-partie (Item 3).
-- Cout d'implementation faible grace a `python-chess` qui supporte nativement la lecture et l'ecriture PGN.
+- Elimine le temps d'attente de 2-4 minutes pour chaque revisite d'une partie deja analysee.
+- Permet la consultation instantanee des revues anterieures depuis le panneau "Parties recentes".
+- Cree le socle de donnees necessaire a toute fonctionnalite future de suivi de progression.
+- Alignement architectural : le module `persistence` sauvegarde deja les parties (PGN) --- etendre ce pattern aux revues est naturel et coherent.
 
 **User story**
 
-> En tant que joueur utilisant ChessLab pour m'entrainer, je veux que mes parties soient sauvegardees automatiquement et exportables au format PGN, afin de pouvoir les revoir plus tard ou les analyser dans d'autres outils.
+> En tant que joueur souhaitant suivre ma progression, je veux que les revues de mes parties soient sauvegardees automatiquement, afin de pouvoir les consulter instantanement sans relancer l'analyse Stockfish a chaque fois.
 
 **Criteres d'acceptation**
 
-1. Chaque partie terminee (ou en cours a la fermeture) est automatiquement sauvegardee dans un repertoire local (`~/.chesslab/games/`).
-2. Le fichier sauvegarde contient le PGN complet avec les en-tetes standard (Event, Date, White, Black, Result, TimeControl).
-3. L'Elo du moteur est enregistre dans les en-tetes PGN (tag `WhiteElo` ou `BlackElo` selon le cote du moteur).
-4. Un bouton "Exporter PGN" dans le GUI permet de sauvegarder la partie en cours dans un fichier choisi par l'utilisateur.
-5. Un bouton "Charger PGN" permet d'importer une partie existante et de la visualiser dans le GUI.
-6. Les parties sauvegardees automatiquement sont listees dans un panneau "Parties recentes" accessible depuis le GUI.
-7. Le format PGN genere est valide et importable sans erreur dans lichess et chess.com.
+1. A la fin d'une revue post-partie, le resultat complet (classifications, evaluations, resume, moments critiques) est automatiquement sauvegarde dans `~/.chesslab/games/` en association avec le fichier PGN correspondant.
+2. Le panneau "Parties recentes" indique visuellement quelles parties disposent d'une revue sauvegardee.
+3. Ouvrir une revue sauvegardee affiche instantanement les resultats sans lancer d'analyse moteur.
+4. L'utilisateur peut relancer une analyse (par exemple a une profondeur superieure) et ecraser la revue precedente.
+5. Le format de stockage des revues est stable et versionne (un changement de structure ne doit pas rendre les anciennes revues illisibles).
+6. La suppression d'une partie (PGN) supprime egalement sa revue associee.
 
-**Impact :** Eleve — prerequis structurant pour toute fonctionnalite de revue et condition necessaire pour que l'outil ait une valeur au-dela de la session.
+**Impact :** Eleve --- transforme la revue d'une operation couteuse et ephemere en un actif consultable instantanement, condition prealable a toute fonctionnalite de suivi de progression.
 
-**Complexite :** Faible — `python-chess` fournit `chess.pgn` avec lecture/ecriture native. L'essentiel du travail est cote GUI (panneau de gestion, dialogues de fichiers).
+**Complexite :** Faible a moyenne --- les structures de donnees (`GameReview`, `ReviewedMove`, `PhaseSummary`) sont deja des dataclasses immutables serialisables. L'effort porte sur le choix du format de stockage (JSON structure ou extension du PGN avec commentaires), la lecture/ecriture, et l'integration dans le panneau de parties recentes.
 
-**Raison de la priorite :** C'est un enabler. Sans persistance, l'Item 3 (revue post-partie) est impossible. Par ailleurs, c'est une attente de base pour tout outil d'echecs — son absence sera percue comme un manque evident par tout joueur habitue aux plateformes existantes.
+**Raison de la priorite :** Deuxieme car elle amplifie la valeur d'une fonctionnalite deja construite (la revue) a faible cout. Elle est aussi un enabler : sans persistance des revues, aucune fonctionnalite de suivi de progression ou d'agregation statistique n'est possible. C'est le meme raisonnement qui avait place la persistance PGN en prerequis de la revue dans l'analyse precedente.
 
 **Risques et points de vigilance**
 
-- Les parties issues du mode observation live (Item 1) doivent egalement etre sauvegardables. La deduction des coups doit etre suffisamment fiable pour produire un PGN coherent.
-- Le `GameCoach` maintient deja un `move_history` — l'effort d'integration est faible.
-- Gestion de l'espace disque : les fichiers PGN sont legers (quelques Ko par partie), pas de risque reel.
-- Le chargement de PGN avec variantes ou commentaires n'est pas necessaire en v1 — se limiter au PGN lineaire.
+- Le format de stockage doit etre choisi avec soin. JSON est le plus simple et le plus flexible pour des structures complexes (evaluations, classifications, lignes de jeu). L'annotation PGN (commentaires dans le PGN) est plus interoperable mais limitee en structure. Privilegier JSON avec un fichier `.review.json` associe a chaque `.pgn`.
+- La compatibilite ascendante est importante : prevoir un champ de version dans le fichier de revue pour gerer les evolutions futures de la structure `GameReview`.
+- Le volume de donnees reste faible (quelques Ko par revue) --- pas de risque de performance.
+- Attention a la coherence : si le PGN est modifie manuellement, la revue associee peut devenir incoherente. Detecter ce cas (hash du PGN) et proposer de relancer l'analyse.
 
 ---
 
-### Item 3 — Revue post-partie avec classification des erreurs
+### Item 3 --- Mode d'entrainement par positions ciblees
 
-**Nature :** Nouvelle fonctionnalite — valeur pedagogique.
+**Nature :** Nouvelle fonctionnalite --- valeur pedagogique.
 
 **Probleme adresse**
 
-L'analyse en temps reel est utile pendant la partie, mais la progression aux echecs repose fondamentalement sur la revue post-partie. Aujourd'hui, ChessLab analyse en temps reel mais ne permet pas de revenir sur une partie terminee pour comprendre ou le joueur s'est trompe. Les plateformes comme lichess et chess.com proposent cette fonctionnalite — mais uniquement pour les parties jouees sur leur site. ChessLab pourrait offrir cette revue pour n'importe quelle partie (jouee localement, observee via capture, ou importee via PGN).
+Le coaching actuel est un mode libre : le joueur affronte Stockfish a un Elo choisi, sans objectif particulier. C'est utile pour la pratique, mais insuffisant pour la progression structuree. Un joueur intermediaire qui veut travailler la defense sicilienne, ameliorer ses fins de partie tour et pion, ou s'entrainer sur les positions ou il commet des erreurs recurrentes n'a aucun moyen de le faire dans ChessLab. Il doit jouer des parties completes en esperant tomber sur la situation qu'il veut travailler.
+
+Or, les donnees pour un entrainement cible existent deja dans le systeme : les revues post-partie identifient les moments critiques (erreurs, gaffes) avec la position FEN exacte. Il suffit de permettre au joueur de rejouer a partir de ces positions pour creer une boucle d'apprentissage ciblee.
 
 **Valeur attendue**
 
-- Transforme ChessLab d'un outil d'observation en un veritable outil de progression.
-- La classification des coups (excellent, bon, imprécision, erreur, gaffe) est le mecanisme pedagogique le plus efficace et le plus demande par les joueurs.
-- Exploite pleinement le moteur Stockfish deja integre — il suffit d'analyser chaque position de la partie et de comparer le coup joue au meilleur coup.
-- Forte retention utilisateur : la revue post-partie est la fonctionnalite qui fait revenir les joueurs.
+- Transforme ChessLab d'un outil d'analyse passive en un outil d'entrainement actif.
+- Exploite les donnees deja produites par le module de revue (positions critiques, meilleur coup) pour creer de la valeur pedagogique supplementaire sans calcul additionnel.
+- Repond au besoin le plus souvent exprime par les joueurs intermediaires : "Je sais que je fais des erreurs en milieu de partie, mais comment m'entrainer specifiquement dessus ?"
+- Differencie ChessLab des simples analyseurs statiques en introduisant une dimension interactive de repetition ciblee.
 
 **User story**
 
-> En tant que joueur souhaitant progresser, je veux pouvoir revoir une partie terminee coup par coup avec une classification de la qualite de chaque coup, afin d'identifier mes erreurs et de comprendre les meilleures alternatives.
+> En tant que joueur souhaitant corriger mes faiblesses, je veux pouvoir m'entrainer a partir des positions ou j'ai commis des erreurs dans mes parties precedentes, afin de travailler specifiquement les situations ou je prends de mauvaises decisions.
 
 **Criteres d'acceptation**
 
-1. Depuis le panneau "Parties recentes" ou apres une partie terminee, l'utilisateur peut lancer une revue.
-2. Le mode revue affiche la partie coup par coup avec navigation avant/arriere (boutons et raccourcis clavier fleches).
-3. Chaque coup du joueur est classifie selon la perte d'evaluation : excellent (0-10 cp), bon (10-30 cp), imprecision (30-80 cp), erreur (80-200 cp), gaffe (> 200 cp ou mat perdu). Les seuils sont configurables.
-4. Le panneau lateral affiche pour chaque position : l'evaluation du coup joue, l'evaluation du meilleur coup, la difference, et la ligne principale du meilleur coup.
-5. Un resume de la partie est affiche : nombre de coups par categorie, evaluation moyenne par phase (ouverture, milieu de jeu, finale), moments critiques.
-6. Les positions ou l'utilisateur a commis une erreur ou une gaffe sont marquees visuellement et navigables directement.
-7. La revue fonctionne sur les parties jouees dans le GUI, les parties observees en live, et les parties importees via PGN.
+1. Depuis la revue d'une partie, l'utilisateur peut cliquer sur un moment critique (erreur ou gaffe) pour lancer un entrainement a partir de cette position.
+2. Le mode entrainement place la position sur l'echiquier et demande au joueur de trouver le meilleur coup (ou un coup acceptable).
+3. Le coup joue par l'utilisateur est compare a l'evaluation Stockfish : si le coup est bon (perte <= 30 cp), la position est validee ; sinon, une explication est donnee (meilleur coup + evaluation).
+4. L'utilisateur peut demander un indice avant de jouer (afficher le meilleur coup sans l'evaluation).
+5. Apres validation ou correction, la partie continue contre Stockfish pendant au moins 5 coups pour voir les consequences du bon coup dans la position.
+6. Un compteur de positions travaillees et de reussites est affiche pendant la session d'entrainement.
 
-**Impact :** Eleve — c'est la fonctionnalite qui convertit un outil technique en produit de coaching a forte valeur percue.
+**Impact :** Eleve --- c'est la fonctionnalite qui fait passer ChessLab d'un outil d'analyse a un outil de progression active. La boucle revoir-identifier-s'entrainer-verifier est le modele pedagogique le plus efficace aux echecs.
 
-**Complexite :** Moyenne a elevee — necessite l'analyse Stockfish de chaque position de la partie (potentiellement 40-80 positions), un mode de navigation dans le GUI, et la logique de classification. L'analyse peut etre realisee en arriere-plan apres la partie.
+**Complexite :** Moyenne --- le mode coaching (`GameCoach`) gere deja le jeu contre Stockfish a partir d'une position FEN arbitraire. L'effort porte sur l'interface de lancement depuis la revue, la logique de validation du coup utilisateur, et le flux de navigation entre revue et entrainement. Depend de l'Item 2 (persistance des revues) pour acceder aux positions critiques sans recalcul.
 
-**Raison de la priorite :** Troisieme car elle depend des Items 1 et 2 (sans persistance, pas de revue ; sans detection automatique, le corpus de parties a revoir sera faible). Mais c'est la fonctionnalite qui donne sa raison d'etre a long terme au produit.
+**Raison de la priorite :** Troisieme car elle depend des deux items precedents (templates multi-themes pour generer un corpus de parties significatif, persistance des revues pour acceder aux positions critiques). Mais c'est la fonctionnalite qui complete la trajectoire produit : capturer → analyser → sauvegarder → revoir → s'entrainer. Elle ferme la boucle d'apprentissage.
 
 **Risques et points de vigilance**
 
-- L'analyse de 60+ positions a profondeur 18 prend du temps (potentiellement 2-4 minutes selon la machine). Prevoir une barre de progression et un mode d'analyse en arriere-plan.
-- La classification par perte de centipawns est l'approche standard mais peut donner des resultats contre-intuitifs dans les positions avec un seul coup legal ou les positions deja perdues. Filtrer les positions ou l'ecart entre les deux meilleurs coups est negligeable.
-- La distinction ouverture/milieu/finale peut etre approximee par le numero de coup et le materiel restant — pas besoin d'un modele sophistique en v1.
-- La profondeur d'analyse pour la revue peut etre inferieure a celle du temps reel (profondeur 16 suffit pour la classification), ce qui accelere le processus.
+- La definition de "coup acceptable" (seuil de perte en centipawns) doit etre calibree selon le niveau du joueur. Un seuil fixe de 30 cp est raisonnable en v1 mais pourrait etre adaptatif a terme.
+- Certaines positions critiques sont des situations de mat tactique ou la seule reponse est un coup force unique --- l'exercice est alors trivial. Filtrer ces positions ou les marquer comme "position a un seul bon coup".
+- L'experience utilisateur de transition entre mode revue et mode entrainement doit etre fluide : le joueur ne doit pas perdre le contexte de la partie qu'il etait en train de revoir.
+- Le `GameCoach` utilise actuellement `chess.engine.play()` pour les reponses du moteur. Pour le mode entrainement, il faudra analyser le coup du joueur avec `chess.engine.analyse()` pour evaluer sa qualite plutot que pour produire un coup.
 
 ---
 
 ## 4. Recommandation strategique
 
-**Lancer en premier : Item 1 — Detection automatique des coups adverses.**
+**Lancer en premier : Item 1 --- Pipeline de generation de templates multi-themes.**
 
-C'est le choix le plus structurant pour trois raisons :
+Ce choix repose sur trois arguments :
 
-1. **Coherence produit.** Aujourd'hui, ChessLab est un projet coupe en deux : une chaine de vision par ordinateur sans interface utilisateur fluide, et un GUI sans lien avec cette chaine. Fusionner les deux donne au projet son identite et sa proposition de valeur unique. Sans cette fusion, ChessLab reste un exercice technique remarquable mais un produit incomplet.
+1. **Debloquer la proposition de valeur unique.** Le mode observation live est ce qui distingue ChessLab de tout autre outil de coaching Stockfish. Mais avec un seul theme supporte, cette fonctionnalite est inaccessible a la grande majorite des utilisateurs. Chaque theme ajoute elargit directement la base d'utilisateurs potentiels. C'est le levier d'impact le plus eleve par unite d'effort.
 
-2. **Effet de levier maximal.** Six modules sur onze (capture, detection, splitting, reconnaissance, monitoring, live) ont ete construits pour ce cas d'usage. Les connecter au GUI active instantanement la valeur de tout ce travail anterieur. Le ratio valeur produite / effort nouveau est le plus favorable des trois items.
+2. **Alimenter le pipeline en aval.** Plus de themes supportes signifie plus de parties observables automatiquement, donc plus de parties sauvegardees, plus de revues, et a terme plus de positions d'entrainement. Les Items 2 et 3 beneficient mecaniquement d'un Item 1 reussi. L'inverse n'est pas vrai : persister des revues ou s'entrainer sur des positions n'a qu'un impact marginal si le corpus de parties reste limite aux parties manuelles contre le moteur.
 
-3. **Generateur de contenu pour la suite.** Une fois que les parties sont detectees automatiquement, le volume de parties jouees et analysables augmente naturellement. Cela cree la masse critique necessaire pour que la persistance (Item 2) et la revue post-partie (Item 3) aient un sens. Sans detection automatique, l'utilisateur ne jouera que des parties manuelles contre le moteur — un cas d'usage deja bien couvert par des outils existants.
+3. **Capitaliser sur l'existant.** L'architecture de reconnaissance est deja generique (dispatch par theme, manifeste JSON, repertoire de templates). Le systeme de detection de theme identifie deja les huit themes. Le script d'extraction de templates existe. L'effort est concentre sur la production et la validation des assets (templates), pas sur de nouvelles abstractions. C'est un travail ou le risque technique est faible et le resultat directement mesurable (taux de reconnaissance par theme).
 
-**Benefice global :** En realisant ces trois items dans l'ordre propose, ChessLab passera d'un MVP technique a un produit de coaching echiqueen complet et differencie — capable de lire automatiquement une partie en cours sur n'importe quel site, de l'analyser en temps reel, de la sauvegarder, et de la revoir avec une classification pedagogique des erreurs. C'est une trajectoire coherente qui maximise la valeur de chaque module deja construit.
+**Benefice global de la trajectoire proposee :** En realisant ces trois items dans l'ordre, ChessLab passera d'un MVP fonctionnel mais contraint a un seul theme a une plateforme de coaching complete : capable de lire automatiquement une partie sur chess.com ou lichess quel que soit le theme, de la sauvegarder avec son analyse, de la revoir instantanement avec classification des erreurs, et de proposer un entrainement cible sur les positions problematiques. Cette trajectoire est a la fois la plus coherente (chaque item enrichit le suivant), la plus pragmatique (effort croissant, valeur immediate des le premier item) et la plus differenciante (aucun outil gratuit ne propose cette boucle complete).

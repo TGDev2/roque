@@ -1,4 +1,4 @@
-"""Side panels for evaluation, suggestions, and move history.
+"""Side panels for evaluation, suggestions, move history, and review.
 
 These are pure display widgets with no business logic.  They receive
 pre-formatted data from the GUI controller.
@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from typing import Callable
 
 from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
+from chesslab.review.game_reviewer import (
+    GamePhase,
+    GameReview,
+    MoveClassification,
+    ReviewedMove,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,25 @@ _WHITE_MOVE_FG = "#e0e0e8"
 _BLACK_MOVE_FG = "#b0b0c0"
 _SCROLLBAR_BG = "#2a2a3c"
 _SCROLLBAR_FG = "#4a4a5c"
+
+# Classification colours.
+_CLS_COLORS: dict[MoveClassification, str] = {
+    MoveClassification.EXCELLENT: "#66bb6a",
+    MoveClassification.GOOD: "#a5d6a7",
+    MoveClassification.INACCURACY: "#ffee58",
+    MoveClassification.MISTAKE: "#ffb74d",
+    MoveClassification.BLUNDER: "#ef5350",
+    MoveClassification.FORCED: "#7a7a8c",
+}
+_CLS_LABELS: dict[MoveClassification, str] = {
+    MoveClassification.EXCELLENT: "Excellent",
+    MoveClassification.GOOD: "Good",
+    MoveClassification.INACCURACY: "Inaccuracy",
+    MoveClassification.MISTAKE: "Mistake",
+    MoveClassification.BLUNDER: "Blunder",
+    MoveClassification.FORCED: "Forced",
+}
+_HIGHLIGHT_BG = "#2a3a4c"
 
 
 def _card_frame(parent: tk.Widget, **kwargs: object) -> tk.Frame:
@@ -331,6 +357,7 @@ class MoveHistoryPanel(tk.Frame):
 
     def set_history(self, moves: tuple[str, ...]) -> None:
         """Replace the entire move history display."""
+        self._on_move_click: Callable[[int], None] | None = None
         self._text.config(state="normal")
         self._text.delete("1.0", "end")
 
@@ -350,3 +377,323 @@ class MoveHistoryPanel(tk.Frame):
 
         self._text.config(state="disabled")
         self._text.see("end")
+
+    def set_review_history(
+        self,
+        moves: tuple[str, ...],
+        classifications: tuple[MoveClassification, ...],
+        on_move_click: Callable[[int], None] | None = None,
+    ) -> None:
+        """Display move history with classification colour-coding.
+
+        Each move SAN is coloured according to its classification.  If
+        *on_move_click* is provided, clicking a move navigates to that ply.
+        """
+        self._on_move_click = on_move_click
+        self._text.config(state="normal")
+        self._text.delete("1.0", "end")
+
+        # Ensure classification tags exist.
+        for cls, colour in _CLS_COLORS.items():
+            tag = f"cls_{cls.value}"
+            self._text.tag_configure(
+                tag, foreground=colour, font=("sans-serif", 11, "bold"),
+            )
+        self._text.tag_configure("highlight", background=_HIGHLIGHT_BG)
+
+        for i in range(0, len(moves), 2):
+            move_num = i // 2 + 1
+            white_move = moves[i]
+            white_cls = classifications[i] if i < len(classifications) else None
+            black_move = moves[i + 1] if i + 1 < len(moves) else ""
+            black_cls = classifications[i + 1] if i + 1 < len(classifications) else None
+
+            if i > 0:
+                self._text.insert("end", "\n")
+
+            self._text.insert("end", f"{move_num}. ", "move_num")
+
+            white_tag = f"cls_{white_cls.value}" if white_cls else "white_move"
+            move_tag = f"ply_{i}"
+            self._text.tag_configure(move_tag)  # click target
+            self._text.insert("end", white_move, (white_tag, move_tag))
+            if on_move_click is not None:
+                ply_idx = i
+                self._text.tag_bind(
+                    move_tag, "<Button-1>",
+                    lambda e, p=ply_idx: self._on_move_click(p) if self._on_move_click else None,
+                )
+
+            if black_move:
+                self._text.insert("end", "  ")
+                black_tag = f"cls_{black_cls.value}" if black_cls else "black_move"
+                move_tag_b = f"ply_{i + 1}"
+                self._text.tag_configure(move_tag_b)
+                self._text.insert("end", black_move, (black_tag, move_tag_b))
+                if on_move_click is not None:
+                    ply_idx_b = i + 1
+                    self._text.tag_bind(
+                        move_tag_b, "<Button-1>",
+                        lambda e, p=ply_idx_b: self._on_move_click(p) if self._on_move_click else None,
+                    )
+
+        self._text.config(state="disabled")
+        self._text.see("end")
+
+    def highlight_ply(self, ply: int) -> None:
+        """Highlight the move at the given half-move index."""
+        self._text.tag_remove("highlight", "1.0", "end")
+        tag = f"ply_{ply}"
+        ranges = self._text.tag_ranges(tag)
+        if ranges:
+            self._text.tag_add("highlight", ranges[0], ranges[1])
+            self._text.see(ranges[0])
+
+
+# ---------------------------------------------------------------------------
+# Review panel — per-move classification details
+# ---------------------------------------------------------------------------
+
+
+class ReviewPanel(tk.Frame):
+    """Displays classification details for the currently selected review move."""
+
+    def __init__(self, parent: tk.Widget) -> None:
+        super().__init__(parent, bg=_BG)
+
+        card = _card_frame(self)
+        card.pack(fill="x")
+        inner = card._inner  # type: ignore[attr-defined]
+
+        tk.Label(
+            inner, text="REVIEW", bg=_CARD_BG, fg=_ACCENT,
+            font=("sans-serif", 9, "bold"), anchor="w", padx=8,
+        ).pack(fill="x", pady=(6, 4))
+
+        # Classification badge.
+        self._badge = tk.Label(
+            inner, text="", bg=_CARD_BG, fg=_FG,
+            font=("sans-serif", 12, "bold"), anchor="w", padx=8,
+        )
+        self._badge.pack(fill="x")
+
+        # Details grid.
+        details = tk.Frame(inner, bg=_CARD_BG)
+        details.pack(fill="x", padx=8, pady=(4, 6))
+
+        self._played_label = self._detail_row(details, "Played")
+        self._best_label = self._detail_row(details, "Best")
+        self._loss_label = self._detail_row(details, "Loss")
+        self._pv_label = self._detail_row(details, "Line")
+
+    @staticmethod
+    def _detail_row(parent: tk.Frame, title: str) -> tk.Label:
+        row = tk.Frame(parent, bg=_CARD_BG)
+        row.pack(fill="x", pady=1)
+        tk.Label(
+            row, text=f"{title}:", bg=_CARD_BG, fg=_FG_DIM,
+            font=("sans-serif", 9), anchor="w", width=6,
+        ).pack(side="left")
+        value = tk.Label(
+            row, text="", bg=_CARD_BG, fg=_FG,
+            font=("sans-serif", 10), anchor="w",
+        )
+        value.pack(side="left", fill="x", expand=True)
+        return value
+
+    def update_move(self, move: ReviewedMove | None) -> None:
+        """Display classification details for a reviewed move."""
+        if move is None:
+            self.clear()
+            return
+
+        cls_color = _CLS_COLORS.get(move.classification, _FG)
+        cls_label = _CLS_LABELS.get(move.classification, "")
+        self._badge.config(text=cls_label, fg=cls_color)
+
+        self._played_label.config(
+            text=f"{move.san}  ({move.eval_after})",
+        )
+        self._best_label.config(
+            text=f"{move.best_move_san}  ({move.best_eval})",
+        )
+        self._loss_label.config(
+            text=f"{move.cp_loss} cp",
+            fg=cls_color,
+        )
+        pv_text = format_pv(move.best_pv_san, max_moves=4)
+        self._pv_label.config(text=pv_text)
+
+    def clear(self) -> None:
+        """Reset to empty state."""
+        self._badge.config(text="")
+        self._played_label.config(text="")
+        self._best_label.config(text="")
+        self._loss_label.config(text="")
+        self._pv_label.config(text="")
+
+
+# ---------------------------------------------------------------------------
+# Review navigation panel
+# ---------------------------------------------------------------------------
+
+
+class ReviewNavigationPanel(tk.Frame):
+    """Navigation buttons for review mode."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        on_first: Callable[[], None],
+        on_prev: Callable[[], None],
+        on_next: Callable[[], None],
+        on_last: Callable[[], None],
+        on_prev_error: Callable[[], None],
+        on_next_error: Callable[[], None],
+        on_exit_review: Callable[[], None],
+    ) -> None:
+        super().__init__(parent, bg=_BG)
+
+        nav_row = tk.Frame(self, bg=_BG)
+        nav_row.pack(fill="x")
+
+        btn_data = [
+            ("\u23ee", on_first),     # |<
+            ("\u25c0", on_prev),      # <
+            ("\u25b6", on_next),      # >
+            ("\u23ed", on_last),      # >|
+        ]
+        for text, cmd in btn_data:
+            b = tk.Button(
+                nav_row, text=text, command=cmd,
+                font=("sans-serif", 12), bg=_CARD_BG, fg=_FG,
+                activebackground=_ACCENT_DIM, activeforeground="#ffffff",
+                relief="flat", bd=0, padx=8, pady=4,
+                cursor="hand2", highlightthickness=0,
+            )
+            b.pack(side="left", fill="x", expand=True, padx=1)
+
+        err_row = tk.Frame(self, bg=_BG)
+        err_row.pack(fill="x", pady=(2, 0))
+
+        prev_err = tk.Button(
+            err_row, text="\u25c0 Error", command=on_prev_error,
+            font=("sans-serif", 9), bg=_CARD_BG, fg=_EVAL_NEGATIVE,
+            activebackground=_ACCENT_DIM, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=6, pady=3,
+            cursor="hand2", highlightthickness=0,
+        )
+        prev_err.pack(side="left", fill="x", expand=True, padx=(0, 1))
+
+        next_err = tk.Button(
+            err_row, text="Error \u25b6", command=on_next_error,
+            font=("sans-serif", 9), bg=_CARD_BG, fg=_EVAL_NEGATIVE,
+            activebackground=_ACCENT_DIM, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=6, pady=3,
+            cursor="hand2", highlightthickness=0,
+        )
+        next_err.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        exit_btn = tk.Button(
+            err_row, text="Exit Review", command=on_exit_review,
+            font=("sans-serif", 9), bg=_CARD_BG, fg=_ACCENT,
+            activebackground=_ACCENT_DIM, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=6, pady=3,
+            cursor="hand2", highlightthickness=0,
+        )
+        exit_btn.pack(side="left", fill="x", expand=True, padx=(1, 0))
+
+        # Position indicator.
+        self._pos_label = tk.Label(
+            self, text="", bg=_BG, fg=_FG_DIM,
+            font=("sans-serif", 9),
+        )
+        self._pos_label.pack(fill="x", pady=(2, 0))
+
+    def update_position(self, current_ply: int, total_plies: int) -> None:
+        """Update the position indicator text."""
+        self._pos_label.config(text=f"Move {current_ply} / {total_plies}")
+
+
+# ---------------------------------------------------------------------------
+# Game summary panel
+# ---------------------------------------------------------------------------
+
+
+class GameSummaryPanel(tk.Frame):
+    """Displays aggregated review statistics."""
+
+    def __init__(self, parent: tk.Widget) -> None:
+        super().__init__(parent, bg=_BG)
+
+        card = _card_frame(self)
+        card.pack(fill="x")
+        self._inner = card._inner  # type: ignore[attr-defined]
+
+        tk.Label(
+            self._inner, text="SUMMARY", bg=_CARD_BG, fg=_ACCENT,
+            font=("sans-serif", 9, "bold"), anchor="w", padx=8,
+        ).pack(fill="x", pady=(6, 4))
+
+        self._content = tk.Frame(self._inner, bg=_CARD_BG)
+        self._content.pack(fill="x", padx=8, pady=(0, 6))
+
+    def update_summary(self, review: GameReview) -> None:
+        """Populate summary from a completed review."""
+        for w in self._content.winfo_children():
+            w.destroy()
+
+        # Classification distribution.
+        cls_frame = tk.Frame(self._content, bg=_CARD_BG)
+        cls_frame.pack(fill="x", pady=(0, 4))
+
+        for cls in (
+            MoveClassification.EXCELLENT,
+            MoveClassification.GOOD,
+            MoveClassification.INACCURACY,
+            MoveClassification.MISTAKE,
+            MoveClassification.BLUNDER,
+        ):
+            w_count = review.white_classification_counts.get(cls, 0)
+            b_count = review.black_classification_counts.get(cls, 0)
+            total = w_count + b_count
+            if total == 0:
+                continue
+            row = tk.Frame(cls_frame, bg=_CARD_BG)
+            row.pack(fill="x", pady=0)
+            tk.Label(
+                row, text=_CLS_LABELS[cls], bg=_CARD_BG,
+                fg=_CLS_COLORS[cls], font=("sans-serif", 9),
+                anchor="w", width=10,
+            ).pack(side="left")
+            tk.Label(
+                row, text=str(total), bg=_CARD_BG, fg=_FG,
+                font=("sans-serif", 9, "bold"), anchor="w",
+            ).pack(side="left")
+
+        # Average cp loss.
+        avg_frame = tk.Frame(self._content, bg=_CARD_BG)
+        avg_frame.pack(fill="x", pady=(4, 0))
+
+        tk.Label(
+            avg_frame, text="Avg loss:", bg=_CARD_BG, fg=_FG_DIM,
+            font=("sans-serif", 9), anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            avg_frame,
+            text=f"  W {review.white_avg_cp_loss:.0f}cp  B {review.black_avg_cp_loss:.0f}cp",
+            bg=_CARD_BG, fg=_FG,
+            font=("sans-serif", 9), anchor="w",
+        ).pack(side="left")
+
+        # Phase summaries.
+        for ps in review.phase_summaries:
+            ph_frame = tk.Frame(self._content, bg=_CARD_BG)
+            ph_frame.pack(fill="x", pady=(2, 0))
+            tk.Label(
+                ph_frame,
+                text=f"{ps.phase.value.capitalize()}: {ps.move_count} moves, avg {ps.avg_cp_loss:.0f}cp",
+                bg=_CARD_BG, fg=_FG_DIM, font=("sans-serif", 8),
+                anchor="w",
+            ).pack(side="left")

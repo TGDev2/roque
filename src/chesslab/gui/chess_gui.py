@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import tkinter as tk
+import tkinter.ttk as ttk
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tkinter import filedialog
@@ -49,7 +51,21 @@ from chesslab.gui.live_observer import (
     ObservationEventType,
     deduce_move_from_fen,
 )
-from chesslab.gui.panels import EvalPanel, MoveHistoryPanel, SuggestionsPanel
+from chesslab.gui.panels import (
+    EvalPanel,
+    GameSummaryPanel,
+    MoveHistoryPanel,
+    ReviewNavigationPanel,
+    ReviewPanel,
+    SuggestionsPanel,
+)
+from chesslab.review.game_reviewer import (
+    GameReview,
+    GameReviewer,
+    MoveClassification,
+    ReviewCancelledError,
+    ReviewConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +211,16 @@ class ChessGui:
         self._storage = GameStorage()
         self._game_saved: bool = False
 
+        # Review mode state.
+        self._in_review_mode: bool = False
+        self._game_review: GameReview | None = None
+        self._review_ply: int = 0
+        self._review_positions: list[str] = []
+        self._review_cancel: threading.Event | None = None
+        self._review_queue: queue.Queue[int | GameReview | Exception] = queue.Queue()
+        self._progress_dialog: tk.Toplevel | None = None
+        self._progress_bar: ttk.Progressbar | None = None
+
         # Widgets (populated by _build_window).
         self._observe_btn: tk.Button | None = None
         self._board_widget: BoardWidget | None = None
@@ -204,6 +230,22 @@ class ChessGui:
         self._move_entry: tk.Entry | None = None
         self._status_label: tk.Label | None = None
         self._status_icon: tk.Label | None = None
+
+        # Review mode widgets.
+        self._review_panel: ReviewPanel | None = None
+        self._review_nav: ReviewNavigationPanel | None = None
+        self._summary_panel: GameSummaryPanel | None = None
+
+        # Play mode widget groups (for hiding/showing during review).
+        self._play_mode_widgets: list[tk.Widget] = []
+        self._review_mode_widgets: list[tk.Widget] = []
+
+        # Frame refs for layout management.
+        self._btn_frame: tk.Frame | None = None
+        self._new_game_btn: tk.Button | None = None
+        self._pgn_frame: tk.Frame | None = None
+        self._entry_frame: tk.Frame | None = None
+        self._submit_btn: tk.Button | None = None
 
     def run(self) -> None:
         """Build the window and enter the tkinter mainloop (blocking)."""
@@ -451,11 +493,11 @@ class ChessGui:
         self._history_panel.pack(fill="both", expand=True, pady=(0, 6))
 
         # Action buttons row.
-        btn_frame = tk.Frame(panel_frame, bg=_BG)
-        btn_frame.pack(fill="x", pady=(0, 4))
+        self._btn_frame = tk.Frame(panel_frame, bg=_BG)
+        self._btn_frame.pack(fill="x", pady=(0, 4))
 
         apply_btn = _styled_button(
-            btn_frame,
+            self._btn_frame,
             text="\u25b6  Apply suggestion",
             command=self._on_apply_suggestion,
             bg=_BTN_ACCENT_BG,
@@ -467,34 +509,34 @@ class ChessGui:
         apply_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
         undo_btn = _styled_button(
-            btn_frame,
+            self._btn_frame,
             text="\u21a9  Undo",
             command=self._on_undo,
         )
         undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
 
         self._observe_btn = _styled_button(
-            btn_frame,
+            self._btn_frame,
             text="\u25ce  Observe",
             command=self._on_toggle_observe,
         )
         self._observe_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         # New game button.
-        new_game_btn = _styled_button(
+        self._new_game_btn = _styled_button(
             panel_frame,
             text="New Game",
             command=self._on_new_game,
             font=("sans-serif", 10),
         )
-        new_game_btn.pack(fill="x", pady=(0, 4))
+        self._new_game_btn.pack(fill="x", pady=(0, 4))
 
         # PGN buttons row.
-        pgn_frame = tk.Frame(panel_frame, bg=_BG)
-        pgn_frame.pack(fill="x", pady=(0, 4))
+        self._pgn_frame = tk.Frame(panel_frame, bg=_BG)
+        self._pgn_frame.pack(fill="x", pady=(0, 4))
 
         export_btn = _styled_button(
-            pgn_frame,
+            self._pgn_frame,
             text="Export PGN",
             command=self._on_export_pgn,
             font=("sans-serif", 9),
@@ -502,7 +544,7 @@ class ChessGui:
         export_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
         load_btn = _styled_button(
-            pgn_frame,
+            self._pgn_frame,
             text="Load PGN",
             command=self._on_load_pgn,
             font=("sans-serif", 9),
@@ -510,12 +552,43 @@ class ChessGui:
         load_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
 
         recent_btn = _styled_button(
-            pgn_frame,
+            self._pgn_frame,
             text="Recent",
             command=self._on_recent_games,
             font=("sans-serif", 9),
         )
-        recent_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        recent_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
+
+        review_btn = _styled_button(
+            self._pgn_frame,
+            text="Review",
+            command=self._on_review_current,
+            font=("sans-serif", 9),
+        )
+        review_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+        # Review mode panels (created but not packed yet).
+        self._review_panel = ReviewPanel(panel_frame)
+        self._review_nav = ReviewNavigationPanel(
+            panel_frame,
+            on_first=self._review_first,
+            on_prev=self._review_prev,
+            on_next=self._review_next,
+            on_last=self._review_last,
+            on_prev_error=self._review_prev_error,
+            on_next_error=self._review_next_error,
+            on_exit_review=self._exit_review_mode,
+        )
+        self._summary_panel = GameSummaryPanel(panel_frame)
+
+        # Track play-mode widgets for hide/show.
+        self._play_mode_widgets = [
+            self._suggestions_panel, self._btn_frame,
+            self._new_game_btn, self._pgn_frame,
+        ]
+        self._review_mode_widgets = [
+            self._review_panel, self._review_nav, self._summary_panel,
+        ]
 
         # Bottom status bar.
         status_bar = tk.Frame(root, bg=_STATUS_BG, height=40)
@@ -526,8 +599,9 @@ class ChessGui:
         inner_status.pack(fill="both", expand=True, padx=8)
 
         # Move entry area.
-        entry_frame = tk.Frame(inner_status, bg=_STATUS_BG)
-        entry_frame.pack(side="left", fill="y", pady=4)
+        self._entry_frame = tk.Frame(inner_status, bg=_STATUS_BG)
+        self._entry_frame.pack(side="left", fill="y", pady=4)
+        entry_frame = self._entry_frame
 
         tk.Label(
             entry_frame, text="Move", bg=_STATUS_BG, fg=_FG_DIM,
@@ -561,7 +635,7 @@ class ChessGui:
             lambda e: entry_border.config(bg=_ENTRY_BORDER),
         )
 
-        submit_btn = _styled_button(
+        self._submit_btn = _styled_button(
             entry_frame,
             text="Submit",
             command=self._on_entry_submit,
@@ -573,7 +647,13 @@ class ChessGui:
             padx=10,
             pady=3,
         )
-        submit_btn.pack(side="left", padx=(6, 0))
+        self._submit_btn.pack(side="left", padx=(6, 0))
+
+        # Keyboard bindings for review mode.
+        root.bind("<Left>", self._on_key_left)
+        root.bind("<Right>", self._on_key_right)
+        root.bind("<Home>", self._on_key_home)
+        root.bind("<End>", self._on_key_end)
 
         # Status text.
         self._status_icon = tk.Label(
@@ -850,6 +930,8 @@ class ChessGui:
 
     def _on_board_move(self, from_sq: str, to_sq: str) -> None:
         """Handle a move from board click (source, destination)."""
+        if self._in_review_mode:
+            return
         assert self._coach is not None
 
         # Build UCI string (to_sq may include promotion char).
@@ -1000,6 +1082,19 @@ class ChessGui:
             except queue.Empty:
                 pass
 
+        # Review progress / completion.
+        try:
+            while True:
+                item = self._review_queue.get_nowait()
+                if isinstance(item, int):
+                    self._update_review_progress(item)
+                elif isinstance(item, GameReview):
+                    self._on_review_complete(item)
+                elif isinstance(item, Exception):
+                    self._on_review_failed(item)
+        except queue.Empty:
+            pass
+
         if self._root is not None:
             self._root.after(_POLL_INTERVAL_MS, self._poll_queue)
 
@@ -1077,6 +1172,8 @@ class ChessGui:
 
     def _on_new_game(self) -> None:
         """Start a new game."""
+        if self._in_review_mode:
+            self._exit_review_mode()
         self._auto_save()
 
         if self._observing:
@@ -1304,6 +1401,14 @@ class ChessGui:
                 dialog.destroy()
                 self._load_pgn_file(selected_game.file_path)
 
+            def on_review() -> None:
+                sel = listbox.curselection()
+                if not sel:
+                    return
+                selected_game = games[sel[0]]
+                dialog.destroy()
+                self._review_from_file(selected_game.file_path)
+
             listbox.bind("<Double-Button-1>", lambda e: on_load())
 
             btn_frame = tk.Frame(container, bg=_BG)
@@ -1320,6 +1425,14 @@ class ChessGui:
                 font=("sans-serif", 10, "bold"),
             )
             load_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+            review_btn = _styled_button(
+                btn_frame,
+                text="Review",
+                command=on_review,
+                font=("sans-serif", 10, "bold"),
+            )
+            review_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
             cancel_btn = _styled_button(
                 btn_frame,
@@ -1346,3 +1459,371 @@ class ChessGui:
             self._root.winfo_height() - dialog.winfo_height()
         ) // 2
         dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    # -- Review mode ---------------------------------------------------------
+
+    def _on_review_current(self) -> None:
+        """Review the current game on the board."""
+        if self._coach is None:
+            self._set_status("No game to review", error=True)
+            return
+        board = self._coach.board
+        if not board.move_stack:
+            self._set_status("No moves to review", error=True)
+            return
+        self._start_review(board)
+
+    def _review_from_file(self, file_path: Path) -> None:
+        """Load a PGN and immediately start review."""
+        try:
+            record = GameStorage.load_game(file_path)
+        except Exception as exc:
+            self._set_status(f"Load failed: {exc}", error=True)
+            logger.exception("Failed to load PGN for review.")
+            return
+
+        if not record.board.move_stack:
+            self._set_status("No moves to review", error=True)
+            return
+
+        # Load into coach for display.
+        assert self._coach is not None
+        self._game_saved = False
+        self._auto_save()
+        self._coach.load_board(record.board)
+        self._game_saved = True
+
+        self._start_review(record.board)
+
+    def _start_review(self, board: chess.Board) -> None:
+        """Begin post-game review: show progress, launch background analysis."""
+        if self._in_review_mode:
+            self._exit_review_mode()
+
+        # Stop current analysis.
+        if self._coach is not None:
+            self._coach.stop_analysis()
+        self._current_handle = None
+
+        # Pre-compute FEN at each ply.
+        root = board.copy()
+        while root.move_stack:
+            root.pop()
+        replay = root
+        self._review_positions = [replay.fen()]
+        for move in board.move_stack:
+            replay.push(move)
+            self._review_positions.append(replay.fen())
+
+        # Clear review queue.
+        while not self._review_queue.empty():
+            try:
+                self._review_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._review_cancel = threading.Event()
+        total = len(board.move_stack)
+
+        # Show progress dialog.
+        self._show_review_progress(total)
+
+        # Launch background worker.
+        board_copy = board.copy()
+        worker = threading.Thread(
+            target=self._review_worker,
+            args=(board_copy,),
+            daemon=True,
+        )
+        worker.start()
+        logger.info("Review started: %d positions to analyse.", total)
+
+    def _review_worker(self, board: chess.Board) -> None:
+        """Background thread: run GameReviewer and post result to queue."""
+        try:
+            reviewer = GameReviewer(ReviewConfig())
+
+            def on_progress(current: int, total: int) -> None:
+                self._review_queue.put(current)
+
+            review = reviewer.review(
+                board,
+                progress_callback=on_progress,
+                cancel_event=self._review_cancel,
+            )
+            self._review_queue.put(review)
+        except Exception as exc:
+            self._review_queue.put(exc)
+
+    def _show_review_progress(self, total: int) -> None:
+        """Show a modal progress dialog for analysis."""
+        assert self._root is not None
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Analysing Game")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", self._cancel_review)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=24, pady=20)
+
+        tk.Label(
+            container, text="Analysing game...", bg=_BG, fg=_FG,
+            font=("sans-serif", 12, "bold"),
+        ).pack(pady=(0, 12))
+
+        self._progress_bar = ttk.Progressbar(
+            container, maximum=total, mode="determinate", length=300,
+        )
+        self._progress_bar.pack(fill="x", pady=(0, 8))
+
+        self._progress_label = tk.Label(
+            container, text=f"0 / {total}", bg=_BG, fg=_FG_DIM,
+            font=("sans-serif", 9),
+        )
+        self._progress_label.pack()
+
+        cancel_btn = _styled_button(
+            container,
+            text="Cancel",
+            command=self._cancel_review,
+            font=("sans-serif", 10),
+        )
+        cancel_btn.pack(pady=(8, 0))
+
+        self._progress_dialog = dialog
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _cancel_review(self) -> None:
+        """Cancel an in-progress review."""
+        if self._review_cancel is not None:
+            self._review_cancel.set()
+        self._close_progress_dialog()
+        self._set_status("Review cancelled")
+
+    def _close_progress_dialog(self) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.destroy()
+            self._progress_dialog = None
+            self._progress_bar = None
+
+    def _update_review_progress(self, current: int) -> None:
+        """Update progress bar (called from poll loop on main thread)."""
+        if self._progress_bar is not None:
+            self._progress_bar["value"] = current
+            total = int(self._progress_bar["maximum"])
+            if hasattr(self, "_progress_label"):
+                self._progress_label.config(text=f"{current} / {total}")
+
+    def _on_review_complete(self, review: GameReview) -> None:
+        """Transition to review mode after analysis finishes."""
+        self._close_progress_dialog()
+        self._game_review = review
+        self._in_review_mode = True
+
+        # Hide play-mode widgets, show review-mode widgets.
+        for w in self._play_mode_widgets:
+            w.pack_forget()
+        if self._entry_frame is not None:
+            self._entry_frame.pack_forget()
+
+        assert self._review_panel is not None
+        assert self._review_nav is not None
+        assert self._summary_panel is not None
+        assert self._history_panel is not None
+        assert self._eval_panel is not None
+
+        self._review_panel.pack(fill="x", pady=(0, 6))
+        self._review_nav.pack(fill="x", pady=(0, 4))
+        self._summary_panel.pack(fill="x", pady=(0, 4))
+
+        # Populate move history with classification colours.
+        moves = tuple(m.san for m in review.moves)
+        classifications = tuple(m.classification for m in review.moves)
+        self._history_panel.set_review_history(
+            moves, classifications,
+            on_move_click=lambda ply: self._review_navigate_to(ply + 1),
+        )
+
+        self._summary_panel.update_summary(review)
+        self._review_navigate_to(0)
+
+        self._set_status(
+            f"Review mode \u2014 {len(review.moves)} moves analysed "
+            f"in {review.total_elapsed_ms / 1000:.1f}s",
+        )
+        logger.info(
+            "Review complete: %d moves, %.1fs",
+            len(review.moves), review.total_elapsed_ms / 1000,
+        )
+
+    def _on_review_failed(self, exc: Exception) -> None:
+        """Handle review failure."""
+        self._close_progress_dialog()
+        if isinstance(exc, ReviewCancelledError):
+            return
+        self._set_status(f"Review failed: {exc}", error=True)
+        logger.exception("Review failed: %s", exc)
+
+    def _exit_review_mode(self) -> None:
+        """Return to normal play mode."""
+        if not self._in_review_mode:
+            return
+
+        self._in_review_mode = False
+        self._game_review = None
+        self._review_ply = 0
+        self._review_positions = []
+
+        # Hide review widgets, show play-mode widgets.
+        for w in self._review_mode_widgets:
+            w.pack_forget()
+
+        assert self._suggestions_panel is not None
+        assert self._btn_frame is not None
+        assert self._new_game_btn is not None
+        assert self._pgn_frame is not None
+        assert self._history_panel is not None
+        assert self._eval_panel is not None
+
+        self._suggestions_panel.pack(fill="x", pady=(0, 6))
+        self._btn_frame.pack(fill="x", pady=(0, 4))
+        self._new_game_btn.pack(fill="x", pady=(0, 4))
+        self._pgn_frame.pack(fill="x", pady=(0, 4))
+        if self._entry_frame is not None:
+            self._entry_frame.pack(side="left", fill="y", pady=4)
+
+        # Restore board to current coach state.
+        if self._coach is not None:
+            assert self._board_widget is not None
+            self._board_widget.set_position(self._coach.current_fen)
+            self._board_widget.clear_last_move()
+            self._board_widget.clear_highlights()
+            self._history_panel.set_history(self._coach.move_history)
+            self._eval_panel.update_eval(None, 0, is_loading=False)
+            self._suggestions_panel.update_suggestions(())
+            self._update_turn_status()
+
+        if self._review_panel is not None:
+            self._review_panel.clear()
+        self._set_status("Exited review mode")
+        logger.info("Review mode exited.")
+
+    # -- Review navigation ---------------------------------------------------
+
+    def _review_navigate_to(self, ply: int) -> None:
+        """Navigate to the given half-move index in review mode."""
+        if not self._in_review_mode or self._game_review is None:
+            return
+
+        total = len(self._game_review.moves)
+        ply = max(0, min(ply, total))
+        self._review_ply = ply
+
+        assert self._board_widget is not None
+        assert self._eval_panel is not None
+        assert self._review_panel is not None
+        assert self._review_nav is not None
+        assert self._history_panel is not None
+
+        # Update board.
+        fen = self._review_positions[ply]
+        self._board_widget.set_position(fen)
+        self._board_widget.clear_highlights()
+
+        # Show last move highlight.
+        if ply > 0:
+            move = self._game_review.moves[ply - 1]
+            from_sq = move.uci[:2]
+            to_sq = move.uci[2:4]
+            self._board_widget.set_last_move(from_sq, to_sq)
+
+            # Show best move arrow if different from played move.
+            if move.best_move_uci and move.best_move_uci != move.uci:
+                best_from = move.best_move_uci[:2]
+                best_to = move.best_move_uci[2:4]
+                self._board_widget.highlight_squares([best_from, best_to])
+        else:
+            self._board_widget.clear_last_move()
+
+        # Update review panel.
+        if ply > 0:
+            reviewed_move = self._game_review.moves[ply - 1]
+            self._review_panel.update_move(reviewed_move)
+            self._eval_panel.update_eval(
+                reviewed_move.eval_after, 0, is_loading=False,
+            )
+        else:
+            self._review_panel.clear()
+            if self._game_review.moves:
+                self._eval_panel.update_eval(
+                    self._game_review.moves[0].eval_before, 0, is_loading=False,
+                )
+            else:
+                self._eval_panel.update_eval(None, 0, is_loading=False)
+
+        # Highlight in move list.
+        if ply > 0:
+            self._history_panel.highlight_ply(ply - 1)
+
+        self._review_nav.update_position(ply, total)
+        self._set_status(f"Review \u2014 Move {ply} / {total}")
+
+    def _review_first(self) -> None:
+        self._review_navigate_to(0)
+
+    def _review_prev(self) -> None:
+        self._review_navigate_to(self._review_ply - 1)
+
+    def _review_next(self) -> None:
+        self._review_navigate_to(self._review_ply + 1)
+
+    def _review_last(self) -> None:
+        if self._game_review is not None:
+            self._review_navigate_to(len(self._game_review.moves))
+
+    def _review_prev_error(self) -> None:
+        """Jump to the previous mistake or blunder."""
+        if self._game_review is None:
+            return
+        for ply_idx in reversed(self._game_review.critical_moments):
+            if ply_idx + 1 < self._review_ply:
+                self._review_navigate_to(ply_idx + 1)
+                return
+
+    def _review_next_error(self) -> None:
+        """Jump to the next mistake or blunder."""
+        if self._game_review is None:
+            return
+        for ply_idx in self._game_review.critical_moments:
+            if ply_idx + 1 > self._review_ply:
+                self._review_navigate_to(ply_idx + 1)
+                return
+
+    # -- Keyboard bindings for review ----------------------------------------
+
+    def _on_key_left(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self._in_review_mode:
+            self._review_prev()
+
+    def _on_key_right(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self._in_review_mode:
+            self._review_next()
+
+    def _on_key_home(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self._in_review_mode:
+            self._review_first()
+
+    def _on_key_end(self, event: tk.Event) -> None:  # type: ignore[type-arg]
+        if self._in_review_mode:
+            self._review_last()
