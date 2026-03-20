@@ -228,6 +228,46 @@ class GameStorage:
             file_path=file_path,
         )
 
+    @staticmethod
+    def load_game_from_text(pgn_text: str) -> GameRecord:
+        """Load a game from PGN text and return a :class:`GameRecord`.
+
+        This is the string-based counterpart of :meth:`load_game`.  It
+        accepts raw PGN content (e.g. pasted from the clipboard) and
+        parses only the first game / main line.
+
+        Raises
+        ------
+        PersistenceError
+            If the text is empty or contains invalid PGN.
+        """
+        try:
+            game = chess.pgn.read_game(io.StringIO(pgn_text))
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to parse PGN: {exc}",
+            ) from exc
+
+        if game is None:
+            raise PersistenceError("No game found in PGN text")
+
+        board = game.board()
+        san_moves: list[str] = []
+        for move in game.mainline_moves():
+            san_moves.append(board.san(move))
+            board.push(move)
+
+        headers = {k: v for k, v in game.headers.items()}
+        result = headers.get("Result", "*")
+
+        return GameRecord(
+            headers=headers,
+            moves=tuple(san_moves),
+            board=board,
+            result=result,
+            file_path=None,
+        )
+
     # -- Listing -------------------------------------------------------------
 
     def list_recent_games(self, limit: int = 20) -> list[GameSummary]:

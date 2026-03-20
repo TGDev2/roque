@@ -29,7 +29,7 @@ from tkinter import filedialog
 
 import chess
 
-from chesslab.persistence.game_storage import GameStorage, build_headers
+from chesslab.persistence.game_storage import GameRecord, GameStorage, build_headers
 
 from chesslab.analysis import AnalysisConfig, ContinuousAnalysisHandle
 from chesslab.coach.game_coach import (
@@ -550,6 +550,14 @@ class ChessGui:
             font=("sans-serif", 9),
         )
         load_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
+
+        paste_btn = _styled_button(
+            self._pgn_frame,
+            text="Paste PGN",
+            command=self._on_paste_pgn,
+            font=("sans-serif", 9),
+        )
+        paste_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
 
         recent_btn = _styled_button(
             self._pgn_frame,
@@ -1493,6 +1501,10 @@ class ChessGui:
             logger.exception("Failed to load PGN for review.")
             return
 
+        self._review_from_record(record)
+
+    def _review_from_record(self, record: GameRecord) -> None:
+        """Start review from an already-loaded :class:`GameRecord`."""
         if not record.board.move_stack:
             self._set_status("No moves to review", error=True)
             return
@@ -1505,6 +1517,126 @@ class ChessGui:
         self._game_saved = True
 
         self._start_review(record.board)
+
+    def _on_paste_pgn(self) -> None:
+        """Show a dialog to paste PGN text and launch review."""
+        assert self._root is not None
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Paste PGN")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            container,
+            text="Paste PGN",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 14, "bold"),
+        ).pack(pady=(0, 8))
+
+        tk.Label(
+            container,
+            text="Paste a game in PGN format below:",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(anchor="w", pady=(0, 4))
+
+        # Text area with border frame.
+        text_border = tk.Frame(container, bg=_ENTRY_BORDER)
+        text_border.pack(fill="both", expand=True)
+
+        text_widget = tk.Text(
+            text_border,
+            bg=_ENTRY_BG,
+            fg=_ENTRY_FG,
+            font=("monospace", 10),
+            insertbackground=_FG,
+            selectbackground=_ACCENT,
+            selectforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=55,
+            height=18,
+            wrap="word",
+        )
+        text_widget.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # Error label (hidden by default).
+        error_label = tk.Label(
+            container,
+            text="",
+            bg=_BG,
+            fg=_ERROR,
+            font=("sans-serif", 9),
+            wraplength=400,
+            justify="left",
+        )
+
+        # Buttons.
+        btn_frame = tk.Frame(container, bg=_BG)
+        btn_frame.pack(fill="x", pady=(8, 0))
+
+        def on_review() -> None:
+            pgn_text = text_widget.get("1.0", "end").strip()
+            if not pgn_text:
+                error_label.config(text="Please paste a PGN game.")
+                error_label.pack(anchor="w", pady=(4, 0))
+                return
+
+            try:
+                record = GameStorage.load_game_from_text(pgn_text)
+            except Exception as exc:
+                error_label.config(text=f"Invalid PGN: {exc}")
+                error_label.pack(anchor="w", pady=(4, 0))
+                return
+
+            if not record.board.move_stack:
+                error_label.config(text="No moves found in PGN.")
+                error_label.pack(anchor="w", pady=(4, 0))
+                return
+
+            dialog.destroy()
+            self._review_from_record(record)
+
+        review_btn = _styled_button(
+            btn_frame,
+            text="Review",
+            command=on_review,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 10, "bold"),
+        )
+        review_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        cancel_btn = _styled_button(
+            btn_frame,
+            text="Cancel",
+            command=dialog.destroy,
+            font=("sans-serif", 10),
+        )
+        cancel_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        # Center dialog over main window.
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        text_widget.focus_set()
 
     def _start_review(self, board: chess.Board) -> None:
         """Begin post-game review: show progress, launch background analysis."""
