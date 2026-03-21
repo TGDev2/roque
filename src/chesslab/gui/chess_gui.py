@@ -19,6 +19,7 @@ Or simply::
 from __future__ import annotations
 
 import logging
+import enum
 import queue
 import threading
 import tkinter as tk
@@ -43,6 +44,12 @@ from chesslab.coach.game_coach import (
     PlayerColor,
 )
 from chesslab.capture.screen_capture import ScreenCapture
+from chesslab.capture.screen_capture import (
+    CapturePermissionError,
+    DisplayUnavailableError,
+    MonitorSelectionError,
+    ScreenCaptureError,
+)
 from chesslab.gui.board_widget import BoardWidget
 from chesslab.gui.live_observer import (
     LiveObserver,
@@ -50,6 +57,7 @@ from chesslab.gui.live_observer import (
     ObservationEvent,
     ObservationEventType,
 )
+from chesslab.live.live_position_processor import LiveFrameStatus
 from chesslab.live.move_deduction import deduce_move_from_fen
 from chesslab.gui.panels import (
     EvalPanel,
@@ -160,6 +168,16 @@ def _styled_button(
 # ---------------------------------------------------------------------------
 
 
+class StartupJourneyMode(enum.Enum):
+    """Initial product flow selected at startup."""
+
+    MANUAL_COACH = "manual_coach"
+    OBSERVE_LIVE = "observe_live"
+    REVIEW_RECENT = "review_recent"
+    REVIEW_PASTE = "review_paste"
+    REVIEW_FILE = "review_file"
+
+
 @dataclass
 class GuiConfig:
     """Configuration for the chess GUI.
@@ -173,11 +191,19 @@ class GuiConfig:
         Stockfish analysis configuration.
     square_size:
         Board square size in pixels.
+    startup_mode:
+        Optional startup flow to bypass the guided launcher.  ``None``
+        shows the startup launcher dialog.
+    startup_review_file:
+        Optional PGN file to review immediately when ``startup_mode`` is
+        :attr:`StartupJourneyMode.REVIEW_FILE`.
     """
 
     player_color: PlayerColor | None = None
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     square_size: int = 64
+    startup_mode: StartupJourneyMode | None = None
+    startup_review_file: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +232,7 @@ class ChessGui:
         self._observer: LiveObserver | None = None
         self._observation_queue: queue.Queue[ObservationEvent] = queue.Queue()
         self._observing: bool = False
+        self._last_observer_config: LiveObserverConfig | None = None
 
         # Persistence.
         self._storage = GameStorage()
@@ -255,13 +282,26 @@ class ChessGui:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._root = root
 
+        startup_mode = self._config.startup_mode
+        if startup_mode is None:
+            startup_mode = self._show_startup_dialog(root)
+
         # Determine player color.
         player_color = self._config.player_color
         if player_color is None:
-            player_color, self._engine_elo = self._show_color_dialog(
-                root,
-                default_engine_elo=self._engine_elo,
-            )
+            if startup_mode in {
+                StartupJourneyMode.REVIEW_RECENT,
+                StartupJourneyMode.REVIEW_PASTE,
+                StartupJourneyMode.REVIEW_FILE,
+            }:
+                player_color = PlayerColor.WHITE
+                if self._engine_elo is None:
+                    self._engine_elo = AnalysisConfig.DEFAULT_ENGINE_ELO
+            else:
+                player_color, self._engine_elo = self._show_color_dialog(
+                    root,
+                    default_engine_elo=self._engine_elo,
+                )
 
         # Create and start coach.
         self._coach = self._create_coach(player_color, self._engine_elo)
@@ -273,6 +313,9 @@ class ChessGui:
 
         # Update status for initial turn.
         self._update_turn_status()
+
+        # Optional guided startup action.
+        root.after(80, lambda: self._apply_startup_mode(startup_mode))
 
         logger.info(
             "ChessLab GUI started: player=%s elo=%s",
@@ -294,6 +337,159 @@ class ChessGui:
         ))
         coach.start()
         return coach
+
+    # -- Startup launcher ----------------------------------------------------
+
+    def _show_startup_dialog(self, parent: tk.Tk) -> StartupJourneyMode:
+        """Show a startup launcher for the main product journeys."""
+        result: list[StartupJourneyMode] = [StartupJourneyMode.MANUAL_COACH]
+
+        dialog = tk.Toplevel(parent)
+        dialog.title("ChessLab")
+        dialog.configure(bg=_BG)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=20, pady=18)
+
+        tk.Label(
+            container,
+            text="Choose your journey",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 16, "bold"),
+        ).pack(anchor="w")
+
+        tk.Label(
+            container,
+            text=(
+                "Start from one place and switch modes in the same app: "
+                "live observe, manual coaching, save/export, and review."
+            ),
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=430,
+        ).pack(anchor="w", pady=(4, 12))
+
+        def choose(mode: StartupJourneyMode) -> None:
+            result[0] = mode
+            dialog.destroy()
+
+        actions = [
+            (
+                "Manual Coach",
+                "Play with guided suggestions and full move history.",
+                StartupJourneyMode.MANUAL_COACH,
+            ),
+            (
+                "Observe Live",
+                "Track a live board from screen capture and sync moves automatically.",
+                StartupJourneyMode.OBSERVE_LIVE,
+            ),
+            (
+                "Review Recent",
+                "Open a saved game and launch full post-game review.",
+                StartupJourneyMode.REVIEW_RECENT,
+            ),
+            (
+                "Paste PGN",
+                "Paste a PGN directly and jump into review mode.",
+                StartupJourneyMode.REVIEW_PASTE,
+            ),
+        ]
+
+        for label, description, mode in actions:
+            card = tk.Frame(container, bg=_CARD_BORDER)
+            card.pack(fill="x", pady=(0, 8))
+            inner = tk.Frame(card, bg=_BG_SECONDARY)
+            inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+            row = tk.Frame(inner, bg=_BG_SECONDARY)
+            row.pack(fill="x", padx=10, pady=(8, 3))
+
+            tk.Label(
+                row,
+                text=label,
+                bg=_BG_SECONDARY,
+                fg=_FG,
+                font=("sans-serif", 11, "bold"),
+                anchor="w",
+            ).pack(side="left")
+
+            _styled_button(
+                row,
+                text="Start",
+                command=lambda m=mode: choose(m),
+                bg=_BTN_ACCENT_BG,
+                fg=_BTN_ACCENT_FG,
+                hover_bg=_BTN_ACCENT_HOVER,
+                active_bg="#1e88e5",
+                font=("sans-serif", 9, "bold"),
+                padx=10,
+                pady=4,
+            ).pack(side="right")
+
+            tk.Label(
+                inner,
+                text=description,
+                bg=_BG_SECONDARY,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                justify="left",
+                wraplength=390,
+                anchor="w",
+            ).pack(fill="x", padx=10, pady=(0, 8))
+
+        footer = tk.Frame(container, bg=_BG)
+        footer.pack(fill="x", pady=(2, 0))
+        _styled_button(
+            footer,
+            text="Default to Manual Coach",
+            command=dialog.destroy,
+            font=("sans-serif", 9),
+            padx=10,
+            pady=5,
+        ).pack(side="right")
+
+        dialog.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        parent.wait_window(dialog)
+        return result[0]
+
+    def _apply_startup_mode(self, mode: StartupJourneyMode) -> None:
+        """Execute optional startup actions chosen from the launcher."""
+        if self._root is None:
+            return
+
+        if mode is StartupJourneyMode.OBSERVE_LIVE:
+            config = self._show_observe_dialog(self._root)
+            if config is not None:
+                self._start_observation(config)
+            return
+
+        if mode is StartupJourneyMode.REVIEW_RECENT:
+            self._set_status("Select a saved game to load or review.")
+            self._on_recent_games()
+            return
+
+        if mode is StartupJourneyMode.REVIEW_PASTE:
+            self._set_status("Paste a PGN to launch review.")
+            self._on_paste_pgn()
+            return
+
+        if mode is StartupJourneyMode.REVIEW_FILE:
+            if self._config.startup_review_file is None:
+                self._set_status("No review file was provided.", error=True)
+                return
+            self._set_status(f"Loading review: {self._config.startup_review_file.name}")
+            self._review_from_file(self._config.startup_review_file)
 
     # -- Color selection dialog ----------------------------------------------
 
@@ -722,10 +918,24 @@ class ChessGui:
             font=("sans-serif", 11, "bold"), anchor="w",
         ).pack(fill="x", padx=12, pady=(10, 4))
 
+        monitor_error: str | None = None
         try:
             monitors = ScreenCapture.list_monitors()
+        except CapturePermissionError:
+            monitors = []
+            monitor_error = (
+                "Screen capture permission is blocked. "
+                "Allow screen recording for Python/Terminal in your OS settings."
+            )
+        except DisplayUnavailableError:
+            monitors = []
+            monitor_error = (
+                "No graphical display is available. "
+                "Start a desktop session and retry."
+            )
         except Exception as exc:
             monitors = []
+            monitor_error = f"Monitor discovery failed: {exc}"
             logger.warning("Cannot list monitors: %s", exc)
 
         monitor_labels = [
@@ -733,8 +943,14 @@ class ChessGui:
         ]
         if not monitor_labels:
             monitor_labels = ["No monitors found"]
+        default_monitor_label = monitor_labels[0]
+        if self._last_observer_config is not None:
+            for monitor, label in zip(monitors, monitor_labels):
+                if monitor.index == self._last_observer_config.monitor_index:
+                    default_monitor_label = label
+                    break
 
-        monitor_var = tk.StringVar(value=monitor_labels[0])
+        monitor_var = tk.StringVar(value=default_monitor_label)
         monitor_menu = tk.OptionMenu(monitor_inner, monitor_var, *monitor_labels)
         monitor_menu.config(
             bg=_BG_SECONDARY, fg=_FG, font=("sans-serif", 10),
@@ -747,6 +963,17 @@ class ChessGui:
         )
         monitor_menu.pack(fill="x", padx=12, pady=(0, 8))
 
+        if monitor_error is not None:
+            tk.Label(
+                monitor_inner,
+                text=monitor_error,
+                bg=_BG_SECONDARY,
+                fg=_ERROR,
+                font=("sans-serif", 9),
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x", padx=12, pady=(0, 8))
+
         # Theme selector.
         theme_card = tk.Frame(container, bg=_CARD_BORDER)
         theme_card.pack(fill="x", pady=(0, 12))
@@ -758,7 +985,14 @@ class ChessGui:
             font=("sans-serif", 11, "bold"), anchor="w",
         ).pack(fill="x", padx=12, pady=(10, 4))
 
-        theme_var = tk.StringVar(value=self._KNOWN_THEMES[0])
+        default_theme = self._KNOWN_THEMES[0]
+        if (
+            self._last_observer_config is not None
+            and self._last_observer_config.theme in self._KNOWN_THEMES
+        ):
+            default_theme = self._last_observer_config.theme
+
+        theme_var = tk.StringVar(value=default_theme)
         theme_menu = tk.OptionMenu(theme_inner, theme_var, *self._KNOWN_THEMES)
         theme_menu.config(
             bg=_BG_SECONDARY, fg=_FG, font=("sans-serif", 10),
@@ -777,7 +1011,10 @@ class ChessGui:
             font=("sans-serif", 10), anchor="w",
         ).pack(fill="x", pady=(0, 8))
 
-        perspective_var = tk.BooleanVar(value=True)
+        default_white_perspective = True
+        if self._last_observer_config is not None:
+            default_white_perspective = self._last_observer_config.white_perspective
+        perspective_var = tk.BooleanVar(value=default_white_perspective)
 
         persp_frame = tk.Frame(container, bg=_BG)
         persp_frame.pack(fill="x", pady=(0, 12))
@@ -868,6 +1105,11 @@ class ChessGui:
         config = self._show_observe_dialog(self._root)
         if config is None:
             return
+        self._start_observation(config)
+
+    def _start_observation(self, config: LiveObserverConfig) -> bool:
+        """Start live observation with explicit lifecycle status handling."""
+        self._set_status("Starting live observation...", waiting=True)
 
         # Clear the observation queue before starting.
         while not self._observation_queue.empty():
@@ -880,20 +1122,22 @@ class ChessGui:
         try:
             observer.start()
         except Exception as exc:
-            self._set_status(f"Observation failed: {exc}", error=True)
+            self._set_status(self._format_observe_start_error(exc), error=True)
             logger.error("Failed to start live observer: %s", exc)
-            return
+            return False
 
         self._observer = observer
         self._observing = True
+        self._last_observer_config = config
 
         if self._observe_btn is not None:
             self._observe_btn.config(text="\u25a0  Stop")
         if self._move_entry is not None:
             self._move_entry.config(state="disabled")
 
-        self._set_status("Live observation active")
+        self._set_status("Live observation active — tracking moves")
         logger.info("Live observation started.")
+        return True
 
     def _stop_observation(self) -> None:
         """Stop live observation and restore manual input."""
@@ -958,11 +1202,62 @@ class ChessGui:
             self._set_status(event.message or "Live tracking resynchronized.")
 
         elif event.type is ObservationEventType.ERROR:
-            self._set_status(event.message, error=True)
+            self._set_status(self._format_observation_error(event), error=True)
 
         elif event.type is ObservationEventType.STOPPED:
             self._stop_observation()
-            self._set_status(event.message, error=True)
+            self._set_status(
+                event.message or "Live observation stopped unexpectedly.",
+                error=True,
+            )
+
+    @staticmethod
+    def _format_observe_start_error(exc: Exception) -> str:
+        """Map startup errors to explicit, actionable UI messages."""
+        if isinstance(exc, CapturePermissionError):
+            return (
+                "Observation blocked: screen-capture permission denied. "
+                "Allow screen recording in OS settings, then retry."
+            )
+        if isinstance(exc, DisplayUnavailableError):
+            return (
+                "Observation unavailable: no display detected. "
+                "Start a graphical desktop session and retry."
+            )
+        if isinstance(exc, MonitorSelectionError):
+            return (
+                f"Observation unavailable: {exc} "
+                "Select a valid monitor in the Observe dialog."
+            )
+        if isinstance(exc, ScreenCaptureError):
+            return f"Observation startup failed: {exc}"
+        return f"Observation startup failed: {exc}"
+
+    @staticmethod
+    def _format_observation_error(event: ObservationEvent) -> str:
+        """Provide actionable status text for runtime observation failures."""
+        if event.frame_status is LiveFrameStatus.BOARD_NOT_FOUND:
+            return (
+                "No board detected. Keep the chessboard fully visible on screen "
+                "and verify the selected monitor."
+            )
+        if event.frame_status is LiveFrameStatus.THEME_UNRECOGNIZED:
+            return (
+                "Theme not recognized. Pick a supported board theme from Observe settings."
+            )
+        if event.frame_status is LiveFrameStatus.THEME_UNSUPPORTED:
+            return (
+                "Theme unsupported. Switch to a built-in theme and restart observation."
+            )
+        if event.frame_status is LiveFrameStatus.POSITION_UNCERTAIN:
+            return (
+                "Position uncertain. Improve capture quality (zoom, contrast, board focus)."
+            )
+        if event.frame_status is LiveFrameStatus.INVALID_POSITION:
+            return (
+                "Detected position is invalid. Wait for a stable frame or restart observation."
+            )
+        return event.message or "Live observation error."
 
     def _sync_coach_to_fen(
         self,

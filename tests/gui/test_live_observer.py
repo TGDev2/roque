@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import chess
 
+from chesslab.capture.screen_capture import CapturePermissionError
 from chesslab.gui.live_observer import (
     LiveObserver,
     LiveObserverConfig,
@@ -55,6 +56,7 @@ class TestLiveObserverLifecycle:
         observer.start()
 
         mock_capture.on_frame.assert_called_once()
+        mock_capture.on_stopped.assert_called_once()
         mock_capture.start.assert_called_once()
         assert observer.is_running
 
@@ -93,6 +95,18 @@ class TestLiveObserverLifecycle:
         observer.start()
         assert observer.is_running
         observer.stop()
+        assert not observer.is_running
+
+    def test_unexpected_capture_stop_enqueues_stopped_event(self) -> None:
+        observer, eq, mock_capture, _, _ = self._make_observer()
+        observer.start()
+
+        stop_callback = mock_capture.on_stopped.call_args.args[0]
+        stop_callback(CapturePermissionError("permission denied"))
+
+        event = eq.get_nowait()
+        assert event.type is ObservationEventType.STOPPED
+        assert "permission" in event.message.lower()
         assert not observer.is_running
 
 

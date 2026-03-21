@@ -25,7 +25,14 @@ from dataclasses import dataclass
 
 from numpy.typing import NDArray
 
-from chesslab.capture.screen_capture import CaptureConfig, ScreenCapture
+from chesslab.capture.screen_capture import (
+    CaptureConfig,
+    CapturePermissionError,
+    DisplayUnavailableError,
+    MonitorSelectionError,
+    ScreenCapture,
+    ScreenCaptureError,
+)
 from chesslab.live.live_game_tracker import (
     GameTrackingEvent,
     GameTrackingEventType,
@@ -113,6 +120,8 @@ class ObservationEvent:
     tracking:
         When game tracking is enabled, the detailed tracking event
         produced by :class:`LiveGameTracker`.
+    frame_status:
+        Raw live-frame status when :attr:`type` is :attr:`ObservationEventType.ERROR`.
     """
 
     type: ObservationEventType
@@ -120,6 +129,7 @@ class ObservationEvent:
     piece_placement: str | None = None
     message: str = ""
     tracking: GameTrackingEvent | None = None
+    frame_status: LiveFrameStatus | None = None
 
 
 # Re-export for backwards compatibility (moved to chesslab.live.move_deduction).
@@ -183,6 +193,7 @@ class LiveObserver:
 
         self._running = False
         self._lock = threading.Lock()
+        self._last_error_signature: tuple[LiveFrameStatus, str] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -209,8 +220,10 @@ class LiveObserver:
 
             self._watcher.on_change(self._on_position_change)
             self._capture.on_frame(self._on_frame)
+            self._capture.on_stopped(self._on_capture_stopped)
             self._capture.start()
             self._running = True
+            self._last_error_signature = None
 
         logger.info(
             "LiveObserver started: monitor=%d theme=%s tracking=%s",
@@ -240,13 +253,56 @@ class LiveObserver:
         result = self._processor.process_frame(frame)
 
         if result.status is LiveFrameStatus.READY:
+            self._last_error_signature = None
             if result.changed and result.fen is not None:
                 self._watcher.update(result.fen)
         else:
+            signature = (result.status, result.message)
+            if signature == self._last_error_signature:
+                return
+            self._last_error_signature = signature
             self._event_queue.put(ObservationEvent(
                 type=ObservationEventType.ERROR,
                 message=result.message,
+                frame_status=result.status,
             ))
+
+    def _on_capture_stopped(self, error: ScreenCaptureError | None) -> None:
+        """Called when the capture backend stops (normal or unexpected)."""
+        with self._lock:
+            if not self._running:
+                return
+            if error is None:
+                return
+            self._running = False
+
+        self._watcher.stop()
+        self._event_queue.put(ObservationEvent(
+            type=ObservationEventType.STOPPED,
+            message=self._format_capture_stop_message(error),
+        ))
+
+    @staticmethod
+    def _format_capture_stop_message(error: ScreenCaptureError) -> str:
+        if isinstance(error, CapturePermissionError):
+            return (
+                "Live observation stopped: screen-capture permission was denied. "
+                "Allow screen recording in your OS settings, then restart observation."
+            )
+        if isinstance(error, DisplayUnavailableError):
+            return (
+                "Live observation stopped: no display is available. "
+                "Open a graphical session and restart observation."
+            )
+        if isinstance(error, MonitorSelectionError):
+            return (
+                "Live observation stopped: selected monitor is no longer available. "
+                "Pick a valid monitor and restart observation."
+            )
+        return (
+            f"Live observation stopped unexpectedly: {error}. "
+            "Restart observation after fixing the capture environment."
+        )
 
     def _on_position_change(
         self,

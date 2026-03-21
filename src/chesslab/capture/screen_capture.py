@@ -88,6 +88,8 @@ class ScreenCapture:
         self._running = False
         self._thread: threading.Thread | None = None
         self._on_frame: Callable[[NDArray[np.uint8]], None] | None = None
+        self._on_stopped: Callable[[ScreenCaptureError | None], None] | None = None
+        self._stop_notified = False
 
     @property
     def config(self) -> CaptureConfig:
@@ -221,6 +223,17 @@ class ScreenCapture:
         """Register a callback invoked after each capture (e.g. detection module)."""
         self._on_frame = callback
 
+    def on_stopped(
+        self,
+        callback: Callable[[ScreenCaptureError | None], None],
+    ) -> None:
+        """Register a callback invoked when capture stops.
+
+        The callback receives ``None`` for a normal stop, or a translated
+        :class:`ScreenCaptureError` when capture aborts due to a runtime issue.
+        """
+        self._on_stopped = callback
+
     def start(self) -> None:
         """Start periodic capture in a background thread."""
         self._require_monitor_selected()
@@ -230,6 +243,7 @@ class ScreenCapture:
             return
 
         self._running = True
+        self._stop_notified = False
         self._thread = threading.Thread(
             target=self._capture_loop, daemon=True, name="screen-capture"
         )
@@ -242,10 +256,13 @@ class ScreenCapture:
 
     def stop(self) -> None:
         """Stop the periodic capture loop."""
+        was_running = self._running
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if was_running:
+            self._notify_stopped(None)
         logger.info("Capture stopped.")
 
     @property
@@ -281,13 +298,18 @@ class ScreenCapture:
                         translated = self._translate_screenshot_error(exc)
                         logger.error("%s", translated)
                         self._running = False
+                        self._notify_stopped(translated)
                         break
                     except IndexError:
+                        err = MonitorSelectionError(
+                            f"Monitor index {monitor_index} no longer exists."
+                        )
                         logger.error(
                             "Monitor index %d no longer exists. Stopping capture.",
                             monitor_index,
                         )
                         self._running = False
+                        self._notify_stopped(err)
                         break
                     except Exception:
                         logger.exception("Error during screen capture.")
@@ -300,3 +322,15 @@ class ScreenCapture:
             translated = self._translate_screenshot_error(exc)
             logger.error("%s", translated)
             self._running = False
+            self._notify_stopped(translated)
+
+    def _notify_stopped(self, error: ScreenCaptureError | None) -> None:
+        if self._stop_notified:
+            return
+        self._stop_notified = True
+        if self._on_stopped is None:
+            return
+        try:
+            self._on_stopped(error)
+        except Exception:
+            logger.exception("Capture stop callback raised an error.")
