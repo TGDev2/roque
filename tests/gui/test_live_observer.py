@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import chess
-import pytest
 
 from chesslab.gui.live_observer import (
     LiveObserver,
@@ -316,3 +314,95 @@ class TestPositionChangeEvent:
         observer._on_position_change(change_event, threading.Event())
 
         assert eq.empty()
+
+
+# ---------------------------------------------------------------------------
+# Position change with tracking enabled
+# ---------------------------------------------------------------------------
+
+
+class TestTrackedPositionChangeEvent:
+    """Ensure tracking emits explicit sync/new-game/resync events."""
+
+    def _make_started_observer(self) -> tuple[LiveObserver, queue.Queue[ObservationEvent]]:
+        eq: queue.Queue[ObservationEvent] = queue.Queue()
+        observer = LiveObserver(
+            LiveObserverConfig(monitor_index=1, enable_game_tracking=True),
+            eq,
+            screen_capture=MagicMock(),
+            processor=MagicMock(),
+            watcher=MagicMock(),
+        )
+        observer.start()
+        return observer, eq
+
+    @staticmethod
+    def _change_event(fen: str) -> PositionChangeEvent:
+        return PositionChangeEvent(previous_fen="", current_fen=fen, elapsed_ms=300.0)
+
+    def test_first_frame_enqueues_tracking_sync(self) -> None:
+        observer, eq = self._make_started_observer()
+
+        start_fen = chess.Board().fen()
+        observer._on_position_change(self._change_event(start_fen), threading.Event())
+
+        event = eq.get_nowait()
+        assert event.type is ObservationEventType.TRACKING_SYNC
+        assert event.tracking is not None
+        assert event.fen == start_fen
+        observer.stop()
+
+    def test_sequence_enqueues_move_detected_from_tracker(self) -> None:
+        observer, eq = self._make_started_observer()
+        board = chess.Board()
+
+        observer._on_position_change(self._change_event(board.fen()), threading.Event())
+        eq.get_nowait()  # TRACKING_SYNC
+
+        board.push_san("e4")
+        observer._on_position_change(self._change_event(board.fen()), threading.Event())
+
+        event = eq.get_nowait()
+        assert event.type is ObservationEventType.MOVE_DETECTED
+        assert event.tracking is not None
+        assert event.tracking.move_san == "e4"
+        assert event.fen == board.fen()
+        observer.stop()
+
+    def test_persistent_discontinuity_enqueues_resync(self) -> None:
+        observer, eq = self._make_started_observer()
+        board = chess.Board()
+
+        observer._on_position_change(self._change_event(board.fen()), threading.Event())
+        eq.get_nowait()  # TRACKING_SYNC
+
+        impossible = "8/8/8/4k3/8/8/8/4K3 w - - 0 1"
+        observer._on_position_change(self._change_event(impossible), threading.Event())
+        assert eq.empty()  # Pending confirmation only.
+
+        observer._on_position_change(self._change_event(impossible), threading.Event())
+        event = eq.get_nowait()
+        assert event.type is ObservationEventType.RESYNC
+        assert event.tracking is not None
+        observer.stop()
+
+    def test_new_game_enqueues_new_game_event(self) -> None:
+        observer, eq = self._make_started_observer()
+        board = chess.Board()
+
+        observer._on_position_change(self._change_event(board.fen()), threading.Event())
+        eq.get_nowait()  # TRACKING_SYNC
+
+        board.push_san("e4")
+        observer._on_position_change(self._change_event(board.fen()), threading.Event())
+        eq.get_nowait()  # MOVE_DETECTED
+
+        start_fen = chess.Board().fen()
+        observer._on_position_change(self._change_event(start_fen), threading.Event())
+        assert eq.empty()  # Pending confirmation.
+
+        observer._on_position_change(self._change_event(start_fen), threading.Event())
+        event = eq.get_nowait()
+        assert event.type is ObservationEventType.NEW_GAME
+        assert event.tracking is not None
+        observer.stop()

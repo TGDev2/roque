@@ -821,6 +821,7 @@ class ChessGui:
                 monitor_index=monitor_index,
                 theme=theme_var.get(),
                 white_perspective=perspective_var.get(),
+                enable_game_tracking=True,
             )
             dialog.destroy()
 
@@ -913,10 +914,21 @@ class ChessGui:
         """Process an observation event from the live observer."""
         assert self._coach is not None
 
-        if event.type is ObservationEventType.MOVE_DETECTED:
+        if event.type is ObservationEventType.TRACKING_SYNC:
+            if event.fen is not None:
+                self._sync_coach_to_fen(event.fen)
+            self._set_status(event.message or "Live tracking synchronized.")
+
+        elif event.type is ObservationEventType.MOVE_DETECTED:
             # If game tracking provided a move, use it directly.
             if event.tracking is not None and event.tracking.move_san is not None:
                 self._submit_san(event.tracking.move_san)
+                if self._coach.current_fen != event.tracking.fen:
+                    logger.warning(
+                        "Live tracking drift detected, resynchronizing coach board."
+                    )
+                    self._sync_coach_to_fen(event.tracking.fen)
+                    self._set_status("Live state resynchronized.")
                 return
 
             # Fallback: deduce move from piece placement (no tracker).
@@ -934,9 +946,16 @@ class ChessGui:
                 )
 
         elif event.type is ObservationEventType.NEW_GAME:
+            if event.fen is not None:
+                self._sync_coach_to_fen(event.fen, auto_save_current=True)
             self._set_status(
                 event.tracking.message if event.tracking else "New game detected.",
             )
+
+        elif event.type is ObservationEventType.RESYNC:
+            if event.fen is not None:
+                self._sync_coach_to_fen(event.fen, auto_save_current=True)
+            self._set_status(event.message or "Live tracking resynchronized.")
 
         elif event.type is ObservationEventType.ERROR:
             self._set_status(event.message, error=True)
@@ -944,6 +963,44 @@ class ChessGui:
         elif event.type is ObservationEventType.STOPPED:
             self._stop_observation()
             self._set_status(event.message, error=True)
+
+    def _sync_coach_to_fen(
+        self,
+        fen: str,
+        *,
+        auto_save_current: bool = False,
+    ) -> bool:
+        """Replace coach and GUI board state with a tracked live FEN."""
+        assert self._coach is not None
+        assert self._board_widget is not None
+        assert self._history_panel is not None
+        assert self._eval_panel is not None
+        assert self._suggestions_panel is not None
+
+        try:
+            board = chess.Board(fen)
+        except ValueError as exc:
+            logger.error("Cannot sync live board from FEN '%s': %s", fen, exc)
+            self._set_status(f"Live sync failed: {exc}", error=True)
+            return False
+
+        if auto_save_current:
+            self._auto_save()
+
+        self._coach.stop_analysis()
+        self._current_handle = None
+        self._best_move_uci = None
+        self._coach.load_board(board)
+        self._game_saved = False
+
+        self._board_widget.set_position(self._coach.current_fen)
+        self._board_widget.clear_last_move()
+        self._board_widget.clear_highlights()
+        self._history_panel.set_history(self._coach.move_history)
+        self._eval_panel.update_eval(None, 0, is_loading=False)
+        self._suggestions_panel.update_suggestions(())
+        self._update_turn_status()
+        return True
 
     # -- Move handling -------------------------------------------------------
 

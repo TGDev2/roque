@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import chess
 
@@ -61,12 +61,23 @@ class GameTrackerConfig:
         placement is used to initialise the board.
     require_confirmation:
         When ``True`` (default), a position discontinuity (no legal move
-        found) must be confirmed by a second identical frame before the
-        tracker acts on it.  This absorbs transient OCR errors.
+        found) must be confirmed across multiple consecutive frames before
+        the tracker acts on it.  This absorbs transient OCR errors.
+    confirmation_frames:
+        Number of consecutive discontinuity frames required before a
+        reset/new-game action is triggered when *require_confirmation*
+        is enabled.
     """
 
     initial_fen: str | None = None
     require_confirmation: bool = True
+    confirmation_frames: int = 2
+
+    def __post_init__(self) -> None:
+        if self.confirmation_frames < 1:
+            raise ValueError(
+                f"confirmation_frames must be >= 1, got {self.confirmation_frames}."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +98,7 @@ class LiveGameTracker:
         self._config = config or GameTrackerConfig()
         self._board: chess.Board | None = None
         self._pending_placement: str | None = None
+        self._pending_count: int = 0
 
         if self._config.initial_fen is not None:
             self._board = chess.Board(self._config.initial_fen)
@@ -111,7 +123,7 @@ class LiveGameTracker:
         # Same position — no change.
         current_placement = self._board.fen().split(" ", 1)[0]
         if piece_placement == current_placement:
-            self._pending_placement = None
+            self._clear_pending_state()
             return GameTrackingEvent(
                 type=GameTrackingEventType.NO_CHANGE,
                 fen=self._board.fen(),
@@ -124,8 +136,13 @@ class LiveGameTracker:
         # Try to find a legal move.
         move = deduce_move_from_fen(self._board, piece_placement)
         if move is not None:
-            self._pending_placement = None
+            self._clear_pending_state()
             return self._apply_move(move, t0)
+
+        # Initial sync ambiguity: first non-start frame may have unknown side-to-move.
+        recovered = self._try_recover_initial_turn(piece_placement, t0)
+        if recovered is not None:
+            return recovered
 
         # No legal move — handle discontinuity.
         return self._handle_discontinuity(piece_placement, t0)
@@ -150,7 +167,7 @@ class LiveGameTracker:
     def reset(self) -> None:
         """Reset to uninitialised state."""
         self._board = None
-        self._pending_placement = None
+        self._clear_pending_state()
 
     # -- Internal helpers ----------------------------------------------------
 
@@ -161,9 +178,7 @@ class LiveGameTracker:
         if is_starting_position(placement):
             self._board = chess.Board()
         else:
-            # Best-effort: assume white to move, full castling, no en passant.
-            fen = f"{placement} w KQkq - 0 1"
-            self._board = chess.Board(fen)
+            self._board = self._board_from_placement(placement, active_color="w")
 
         logger.info("Game tracking started: %s", self._board.fen())
         return GameTrackingEvent(
@@ -207,21 +222,32 @@ class LiveGameTracker:
     ) -> GameTrackingEvent:
         """Handle a position that no legal move can produce."""
         if self._config.require_confirmation:
-            if self._pending_placement is None or self._pending_placement != placement:
-                # First occurrence or different from previous pending — wait.
+            if self._pending_placement == placement:
+                self._pending_count += 1
+            else:
                 self._pending_placement = placement
-                logger.debug("Pending confirmation for discontinuity.")
+                self._pending_count = 1
+
+            if self._pending_count < self._required_confirmations:
+                logger.debug(
+                    "Pending discontinuity confirmation (%d/%d).",
+                    self._pending_count,
+                    self._required_confirmations,
+                )
                 return GameTrackingEvent(
                     type=GameTrackingEventType.NO_CHANGE,
                     fen=self._board.fen(),  # type: ignore[union-attr]
                     move_number=self._board.fullmove_number,  # type: ignore[union-attr]
                     active_color="w" if self._board.turn == chess.WHITE else "b",  # type: ignore[union-attr]
                     elapsed_ms=_elapsed(t0),
-                    message="Awaiting confirmation of position change.",
+                    message=(
+                        "Awaiting discontinuity confirmation "
+                        f"({self._pending_count}/{self._required_confirmations})."
+                    ),
                 )
-            # Second identical frame — confirmed.
+            # Confirmed.
 
-        self._pending_placement = None
+        self._clear_pending_state()
 
         if is_starting_position(placement):
             self._board = chess.Board()
@@ -237,17 +263,81 @@ class LiveGameTracker:
             )
 
         # Non-starting discontinuity.
-        fen = f"{placement} w KQkq - 0 1"
-        self._board = chess.Board(fen)
+        previous_turn = "w" if self._board.turn == chess.WHITE else "b"  # type: ignore[union-attr]
+        self._board = self._board_from_placement(placement, active_color=previous_turn)
         logger.info("Position reset to: %s", self._board.fen())
         return GameTrackingEvent(
             type=GameTrackingEventType.POSITION_RESET,
             fen=self._board.fen(),
             move_number=1,
-            active_color="w",
+            active_color=previous_turn,
             elapsed_ms=_elapsed(t0),
             message="Position discontinuity — board reset.",
         )
+
+    def _try_recover_initial_turn(
+        self,
+        placement: str,
+        t0: float,
+    ) -> GameTrackingEvent | None:
+        """Recover from unknown active colour right after an initial sync."""
+        if self._board is None or self._board.move_stack:
+            return None
+
+        candidate = self._board.copy(stack=False)
+        candidate.turn = not candidate.turn
+
+        move = deduce_move_from_fen(candidate, placement)
+        if move is None:
+            return None
+
+        self._board = candidate
+        self._clear_pending_state()
+        logger.info(
+            "Recovered live continuity by flipping active color during initial sync."
+        )
+        return self._apply_move(move, t0)
+
+    def _board_from_placement(
+        self,
+        placement: str,
+        *,
+        active_color: str,
+    ) -> chess.Board:
+        """Create a board from placement with best-effort castling inference."""
+        castling = self._infer_castling_rights(placement)
+        fen = f"{placement} {active_color} {castling} - 0 1"
+        return chess.Board(fen)
+
+    @staticmethod
+    def _infer_castling_rights(placement: str) -> str:
+        """Infer likely castling availability from piece homes."""
+        board = chess.Board(f"{placement} w - - 0 1")
+        rights = ""
+
+        if board.piece_at(chess.E1) == chess.Piece(chess.KING, chess.WHITE):
+            if board.piece_at(chess.H1) == chess.Piece(chess.ROOK, chess.WHITE):
+                rights += "K"
+            if board.piece_at(chess.A1) == chess.Piece(chess.ROOK, chess.WHITE):
+                rights += "Q"
+
+        if board.piece_at(chess.E8) == chess.Piece(chess.KING, chess.BLACK):
+            if board.piece_at(chess.H8) == chess.Piece(chess.ROOK, chess.BLACK):
+                rights += "k"
+            if board.piece_at(chess.A8) == chess.Piece(chess.ROOK, chess.BLACK):
+                rights += "q"
+
+        return rights or "-"
+
+    @property
+    def _required_confirmations(self) -> int:
+        if not self._config.require_confirmation:
+            return 1
+        return self._config.confirmation_frames
+
+    def _clear_pending_state(self) -> None:
+        self._pending_placement = None
+        self._pending_count = 0
 
 
 def _elapsed(t0: float) -> float:

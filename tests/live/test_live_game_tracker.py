@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import chess
+import pytest
 
 from chesslab.live.live_game_tracker import (
     GameTrackerConfig,
-    GameTrackingEvent,
     GameTrackingEventType,
     LiveGameTracker,
 )
@@ -57,6 +57,10 @@ class TestInitialisation:
         assert tracker.is_tracking
         assert tracker.board is not None
         assert tracker.board.fen() == fen
+
+    def test_invalid_confirmation_frames_rejected(self) -> None:
+        with pytest.raises(ValueError, match="confirmation_frames"):
+            GameTrackerConfig(confirmation_frames=0)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +115,25 @@ class TestConsecutiveMoves:
         event = tracker.update(placement)
         assert event.active_color == "w"
         assert event.move_number == 2
+
+    def test_midgame_initial_sync_recovers_unknown_turn(self) -> None:
+        tracker = LiveGameTracker()
+        board = chess.Board()
+        board.push_san("e4")
+
+        # First seen frame is midgame: side-to-move is ambiguous.
+        start_event = tracker.update(board.fen().split(" ", 1)[0])
+        assert start_event.type is GameTrackingEventType.GAME_STARTED
+
+        # Next frame is a legal black move.
+        placement_e5 = _placement_after(board, "e5")
+        board.push_san("e5")
+        event = tracker.update(placement_e5)
+
+        assert event.type is GameTrackingEventType.MOVE
+        assert event.move_san == "e5"
+        assert tracker.board is not None
+        assert tracker.board.fen() == board.fen()
 
 
 # ---------------------------------------------------------------------------

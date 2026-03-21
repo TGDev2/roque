@@ -88,8 +88,10 @@ class LiveObserverConfig:
 class ObservationEventType(enum.Enum):
     """Type of event emitted by the live observer."""
 
+    TRACKING_SYNC = "tracking_sync"
     MOVE_DETECTED = "move_detected"
     NEW_GAME = "new_game"
+    RESYNC = "resync"
     ERROR = "error"
     STOPPED = "stopped"
 
@@ -103,7 +105,7 @@ class ObservationEvent:
     type:
         The kind of event.
     fen:
-        Full FEN string when available (``MOVE_DETECTED``).
+        Full FEN string when available.
     piece_placement:
         First FEN field (piece placement only) for move deduction.
     message:
@@ -283,14 +285,13 @@ class LiveObserver:
 
         if tracking_event.type is GameTrackingEventType.MOVE:
             obs_type = ObservationEventType.MOVE_DETECTED
-        elif tracking_event.type in (
-            GameTrackingEventType.NEW_GAME_DETECTED,
-            GameTrackingEventType.POSITION_RESET,
-        ):
+        elif tracking_event.type is GameTrackingEventType.NEW_GAME_DETECTED:
             obs_type = ObservationEventType.NEW_GAME
+        elif tracking_event.type is GameTrackingEventType.POSITION_RESET:
+            obs_type = ObservationEventType.RESYNC
         else:
-            # GAME_STARTED — enqueue as MOVE_DETECTED (initial position).
-            obs_type = ObservationEventType.MOVE_DETECTED
+            # GAME_STARTED — explicit sync event (not a move).
+            obs_type = ObservationEventType.TRACKING_SYNC
 
         self._event_queue.put(ObservationEvent(
             type=obs_type,
