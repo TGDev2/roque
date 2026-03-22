@@ -278,6 +278,39 @@ class GameCoach:
 
         logger.info("Player played: %s (FEN: %s)", normalised_san, self._board.fen())
 
+    def record_move(self, move_san: str) -> str:
+        """Register a legal move without triggering analysis or side checks.
+
+        This is used by passive synchronization flows that need to keep the
+        board state and SAN history in sync without exposing coaching logic.
+
+        Parameters
+        ----------
+        move_san:
+            The move in Standard Algebraic Notation.
+
+        Returns
+        -------
+        str
+            The normalized SAN of the recorded move.
+
+        Raises
+        ------
+        GameOverError
+            If the game is already over.
+        IllegalMoveError
+            If *move_san* is not a legal move in the current position.
+        """
+        self._check_game_not_over()
+        self.stop_analysis()
+
+        move = self._parse_san(move_san)
+        normalised_san = self._board.san(move)
+        self._board.push(move)
+
+        logger.info("Recorded move: %s (FEN: %s)", normalised_san, self._board.fen())
+        return normalised_san
+
     def submit_opponent_move_continuous(
         self,
         move_san: str,

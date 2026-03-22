@@ -207,6 +207,76 @@ class EvalPanel(tk.Frame):
 
 
 # ---------------------------------------------------------------------------
+# Observe Live panel
+# ---------------------------------------------------------------------------
+
+
+class ObserveLivePanel(tk.Frame):
+    """Passive-session panel shown while Observe Live is active."""
+
+    def __init__(self, parent: tk.Widget) -> None:
+        super().__init__(parent, bg=_BG)
+
+        card = _card_frame(self)
+        card.pack(fill="x")
+        inner = card._inner  # type: ignore[attr-defined]
+
+        tk.Label(
+            inner, text="OBSERVE LIVE", bg=_CARD_BG, fg=_ACCENT,
+            font=("sans-serif", 9, "bold"), anchor="w", padx=8,
+        ).pack(fill="x", pady=(6, 4))
+
+        self._badge = tk.Label(
+            inner, text="PASSIVE SYNC", bg=_ACCENT_DIM, fg="#ffffff",
+            font=("sans-serif", 9, "bold"), anchor="w", padx=8, pady=3,
+        )
+        self._badge.pack(anchor="w", padx=8, pady=(0, 6))
+
+        self._headline = tk.Label(
+            inner, text="", bg=_CARD_BG, fg=_FG,
+            font=("sans-serif", 12, "bold"), anchor="w",
+            justify="left", wraplength=240,
+        )
+        self._headline.pack(fill="x", padx=8)
+
+        self._body = tk.Label(
+            inner, text="", bg=_CARD_BG, fg=_FG_DIM,
+            font=("sans-serif", 9), anchor="w",
+            justify="left", wraplength=240,
+        )
+        self._body.pack(fill="x", padx=8, pady=(6, 10))
+
+        self.update_session()
+
+    def update_session(
+        self,
+        *,
+        setup_label: str | None = None,
+        move_count: int = 0,
+    ) -> None:
+        """Refresh passive-session copy for the current observation state."""
+        if setup_label:
+            headline = f"Passive observation active for {setup_label}"
+        else:
+            headline = "Passive observation is active"
+
+        move_text = (
+            "Waiting for the first synced move."
+            if move_count == 0
+            else f"{move_count} synced {'move' if move_count == 1 else 'moves'} captured."
+        )
+        body = (
+            "ChessLab is syncing the visible board and move list only. "
+            "Manual move entry, undo, and engine coaching stay unavailable "
+            "until you explicitly exit to Manual Coach or Review.\n\n"
+            f"{move_text}"
+        )
+
+        self._headline.config(text=headline)
+        self._body.config(text=body)
+
+
+# ---------------------------------------------------------------------------
 # Suggestions panel
 # ---------------------------------------------------------------------------
 

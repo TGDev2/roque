@@ -64,6 +64,7 @@ from chesslab.gui.panels import (
     EvalPanel,
     GameSummaryPanel,
     MoveHistoryPanel,
+    ObserveLivePanel,
     ReviewNavigationPanel,
     ReviewPanel,
     SuggestionsPanel,
@@ -262,8 +263,11 @@ class ChessGui:
 
         # Widgets (populated by _build_window).
         self._observe_btn: tk.Button | None = None
+        self._apply_btn: tk.Button | None = None
+        self._undo_btn: tk.Button | None = None
         self._board_widget: BoardWidget | None = None
         self._eval_panel: EvalPanel | None = None
+        self._observe_panel: ObserveLivePanel | None = None
         self._suggestions_panel: SuggestionsPanel | None = None
         self._history_panel: MoveHistoryPanel | None = None
         self._move_entry: tk.Entry | None = None
@@ -736,6 +740,8 @@ class ChessGui:
         self._eval_panel = EvalPanel(panel_frame, bar_height=160)
         self._eval_panel.pack(fill="x", pady=(0, 6))
 
+        self._observe_panel = ObserveLivePanel(panel_frame)
+
         self._suggestions_panel = SuggestionsPanel(panel_frame)
         self._suggestions_panel.pack(fill="x", pady=(0, 6))
 
@@ -746,7 +752,7 @@ class ChessGui:
         self._btn_frame = tk.Frame(panel_frame, bg=_BG)
         self._btn_frame.pack(fill="x", pady=(0, 4))
 
-        apply_btn = _styled_button(
+        self._apply_btn = _styled_button(
             self._btn_frame,
             text="\u25b6  Apply suggestion",
             command=self._on_apply_suggestion,
@@ -756,14 +762,14 @@ class ChessGui:
             active_bg="#1e88e5",
             font=("sans-serif", 10, "bold"),
         )
-        apply_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self._apply_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
 
-        undo_btn = _styled_button(
+        self._undo_btn = _styled_button(
             self._btn_frame,
             text="\u21a9  Undo",
             command=self._on_undo,
         )
-        undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
+        self._undo_btn.pack(side="left", fill="x", expand=True, padx=(3, 3))
 
         self._observe_btn = _styled_button(
             self._btn_frame,
@@ -841,7 +847,8 @@ class ChessGui:
 
         # Track play-mode widgets for hide/show.
         self._play_mode_widgets = [
-            self._suggestions_panel, self._btn_frame,
+            self._eval_panel, self._observe_panel, self._suggestions_panel,
+            self._btn_frame,
             self._new_game_btn, self._pgn_frame,
         ]
         self._review_mode_widgets = [
@@ -1665,10 +1672,9 @@ class ChessGui:
         self._observing = True
         self._last_observer_config = config
 
-        if self._observe_btn is not None:
-            self._observe_btn.config(text="\u25a0  Stop Live")
-        if self._move_entry is not None:
-            self._move_entry.config(state="disabled")
+        self._clear_coaching_outputs()
+        self._set_observe_mode_ui(True)
+        self._refresh_observe_panel()
 
         if config.setup_id:
             support = (
@@ -1692,11 +1698,7 @@ class ChessGui:
             self._observer = None
         self._observing = False
 
-        if self._observe_btn is not None:
-            self._observe_btn.config(text="\u25ce  Observe Live")
-        if self._move_entry is not None:
-            self._move_entry.config(state="normal")
-
+        self._set_observe_mode_ui(False)
         self._update_turn_status()
         logger.info("Live observation stopped.")
 
@@ -1712,7 +1714,7 @@ class ChessGui:
         elif event.type is ObservationEventType.MOVE_DETECTED:
             # If game tracking provided a move, use it directly.
             if event.tracking is not None and event.tracking.move_san is not None:
-                self._submit_san(event.tracking.move_san)
+                self._submit_san(event.tracking.move_san, passive=True)
                 if self._coach.current_fen != event.tracking.fen:
                     logger.warning(
                         "Live tracking drift detected, resynchronizing coach board."
@@ -1728,7 +1730,7 @@ class ChessGui:
             move = deduce_move_from_fen(board, event.piece_placement)
             if move is not None:
                 san = board.san(move)
-                self._submit_san(san)
+                self._submit_san(san, passive=True)
             else:
                 self._set_status(
                     "Position changed \u2014 no legal move matches",
@@ -1805,6 +1807,180 @@ class ChessGui:
             )
         return event.message or "Live observation error."
 
+    def _drain_analysis_queue(self) -> None:
+        """Discard any queued analysis updates."""
+        while not self._update_queue.empty():
+            try:
+                self._update_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _clear_coaching_outputs(self) -> None:
+        """Clear engine-driven UI state and stop any in-flight analysis."""
+        if self._coach is not None:
+            self._coach.stop_analysis()
+        self._current_handle = None
+        self._best_move_uci = None
+        self._drain_analysis_queue()
+
+        if self._board_widget is not None:
+            self._board_widget.clear_highlights()
+        if self._eval_panel is not None:
+            self._eval_panel.update_eval(None, 0, is_loading=False)
+        if self._suggestions_panel is not None:
+            self._suggestions_panel.update_suggestions(())
+
+    def _refresh_observe_panel(self) -> None:
+        """Refresh passive-session copy while Observe Live is active."""
+        if self._observe_panel is None or self._coach is None:
+            return
+        setup_label = (
+            self._last_observer_config.setup_id
+            if self._last_observer_config is not None
+            else None
+        )
+        self._observe_panel.update_session(
+            setup_label=setup_label,
+            move_count=len(self._coach.move_history),
+        )
+
+    def _set_observe_mode_ui(self, observing: bool) -> None:
+        """Toggle between passive Observe Live UI and Manual Coach UI."""
+        if self._in_review_mode:
+            return
+
+        if self._board_widget is not None:
+            self._board_widget.set_interactive(not observing)
+
+        if self._move_entry is not None:
+            if observing:
+                self._move_entry.delete(0, "end")
+            self._move_entry.config(state="disabled" if observing else "normal")
+        if self._submit_btn is not None:
+            self._submit_btn.config(state="disabled" if observing else "normal")
+
+        if observing:
+            if self._eval_panel is not None:
+                self._eval_panel.pack_forget()
+            if self._suggestions_panel is not None:
+                self._suggestions_panel.pack_forget()
+            if self._observe_panel is not None:
+                if self._history_panel is not None:
+                    self._observe_panel.pack(
+                        fill="x",
+                        pady=(0, 6),
+                        before=self._history_panel,
+                    )
+                else:
+                    self._observe_panel.pack(fill="x", pady=(0, 6))
+            if self._btn_frame is not None:
+                if self._history_panel is not None:
+                    self._btn_frame.pack(
+                        fill="x",
+                        pady=(0, 4),
+                        after=self._history_panel,
+                    )
+                else:
+                    self._btn_frame.pack(fill="x", pady=(0, 4))
+            if self._new_game_btn is not None:
+                self._new_game_btn.pack_forget()
+            if self._pgn_frame is not None:
+                self._pgn_frame.pack_forget()
+            if self._entry_frame is not None:
+                self._entry_frame.pack_forget()
+
+            if self._apply_btn is not None:
+                self._apply_btn.config(
+                    text="Manual Coach",
+                    command=self._exit_observe_to_manual_coach,
+                )
+            if self._undo_btn is not None:
+                self._undo_btn.config(
+                    text="Stop Live",
+                    command=self._stop_observation,
+                )
+            if self._observe_btn is not None:
+                self._observe_btn.config(
+                    text="Review",
+                    command=self._exit_observe_to_review,
+                )
+            return
+
+        if self._observe_panel is not None:
+            self._observe_panel.pack_forget()
+        if self._eval_panel is not None:
+            if self._history_panel is not None:
+                self._eval_panel.pack(fill="x", pady=(0, 6), before=self._history_panel)
+            else:
+                self._eval_panel.pack(fill="x", pady=(0, 6))
+        if self._suggestions_panel is not None:
+            if self._history_panel is not None:
+                self._suggestions_panel.pack(
+                    fill="x",
+                    pady=(0, 6),
+                    before=self._history_panel,
+                )
+            else:
+                self._suggestions_panel.pack(fill="x", pady=(0, 6))
+        if self._btn_frame is not None:
+            if self._history_panel is not None:
+                self._btn_frame.pack(fill="x", pady=(0, 4), after=self._history_panel)
+            else:
+                self._btn_frame.pack(fill="x", pady=(0, 4))
+        if self._new_game_btn is not None:
+            if self._btn_frame is not None:
+                self._new_game_btn.pack(fill="x", pady=(0, 4), after=self._btn_frame)
+            else:
+                self._new_game_btn.pack(fill="x", pady=(0, 4))
+        if self._pgn_frame is not None:
+            if self._new_game_btn is not None:
+                self._pgn_frame.pack(fill="x", pady=(0, 4), after=self._new_game_btn)
+            else:
+                self._pgn_frame.pack(fill="x", pady=(0, 4))
+        if self._entry_frame is not None:
+            self._entry_frame.pack(side="left", fill="y", pady=4)
+
+        if self._apply_btn is not None:
+            self._apply_btn.config(
+                text="\u25b6  Apply suggestion",
+                command=self._on_apply_suggestion,
+            )
+        if self._undo_btn is not None:
+            self._undo_btn.config(
+                text="\u21a9  Undo",
+                command=self._on_undo,
+            )
+        if self._observe_btn is not None:
+            self._observe_btn.config(
+                text="\u25ce  Observe Live",
+                command=self._on_toggle_observe,
+            )
+
+    def _exit_observe_to_manual_coach(self) -> None:
+        """Leave passive observation and return to manual coaching."""
+        if not self._observing:
+            return
+        self._stop_observation()
+        self._set_status(
+            "Observe Live stopped — Manual Coach restored. Enter moves yourself to continue."
+        )
+
+    def _exit_observe_to_review(self) -> None:
+        """Leave passive observation and start a review explicitly."""
+        if self._coach is None:
+            self._set_status("No game to review", error=True)
+            return
+        board = self._coach.board
+        if not board.move_stack:
+            self._set_status(
+                "No synced moves to review yet. Keep observing or exit to Manual Coach.",
+                error=True,
+            )
+            return
+        if self._observing:
+            self._stop_observation()
+        self._start_review(board)
+
     def _sync_coach_to_fen(
         self,
         fen: str,
@@ -1840,6 +2016,7 @@ class ChessGui:
         self._history_panel.set_history(self._coach.move_history)
         self._eval_panel.update_eval(None, 0, is_loading=False)
         self._suggestions_panel.update_suggestions(())
+        self._refresh_observe_panel()
         self._update_turn_status()
         return True
 
@@ -1847,7 +2024,7 @@ class ChessGui:
 
     def _on_board_move(self, from_sq: str, to_sq: str) -> None:
         """Handle a move from board click (source, destination)."""
-        if self._in_review_mode:
+        if self._in_review_mode or self._observing:
             return
         assert self._coach is not None
 
@@ -1866,6 +2043,12 @@ class ChessGui:
 
     def _on_entry_submit(self, event: tk.Event | None = None) -> None:  # type: ignore[type-arg]
         """Handle SAN move submission from the text entry."""
+        if self._observing:
+            self._set_status(
+                "Observe Live is passive. Exit to Manual Coach before entering moves.",
+                error=True,
+            )
+            return
         assert self._move_entry is not None
         san = self._move_entry.get().strip()
         if not san:
@@ -1875,6 +2058,12 @@ class ChessGui:
 
     def _on_apply_suggestion(self) -> None:
         """Apply the current best move suggestion to the board."""
+        if self._observing:
+            self._set_status(
+                "Observe Live is passive. Exit to Manual Coach before using coaching actions.",
+                error=True,
+            )
+            return
         assert self._coach is not None
 
         if self._best_move_uci is None:
@@ -1899,6 +2088,12 @@ class ChessGui:
 
     def _on_undo(self) -> None:
         """Undo the last move."""
+        if self._observing:
+            self._set_status(
+                "Observe Live is passive. Exit to Manual Coach before changing moves.",
+                error=True,
+            )
+            return
         assert self._coach is not None
 
         san = self._coach.undo_move()
@@ -1924,11 +2119,17 @@ class ChessGui:
         self._update_turn_status()
         logger.info("Undo: %s", san)
 
-    def _submit_san(self, san: str) -> None:
+    def _submit_san(self, san: str, *, passive: bool = False) -> None:
         """Submit a SAN move, routing to opponent or player method."""
         assert self._coach is not None
 
         try:
+            if passive:
+                self._coach.record_move(san)
+                self._clear_coaching_outputs()
+                self._refresh_after_move()
+                return
+
             if self._coach.is_player_turn:
                 self._coach.submit_player_move(san)
                 self._refresh_after_move()
@@ -2017,6 +2218,9 @@ class ChessGui:
 
     def _apply_advice(self, advice: ContinuousAdvice) -> None:
         """Apply a ContinuousAdvice update to the panels."""
+        if self._observing:
+            return
+
         update = advice.update
 
         if self._eval_panel is not None:
@@ -2040,6 +2244,11 @@ class ChessGui:
     def _update_turn_status(self) -> None:
         """Update the status label to show whose turn it is."""
         assert self._coach is not None
+
+        if self._observing:
+            self._refresh_observe_panel()
+            self._set_status("Observe Live active \u2014 passive sync only.")
+            return
 
         if self._coach.is_game_over:
             self._auto_save()
@@ -2386,6 +2595,9 @@ class ChessGui:
 
     def _on_review_current(self) -> None:
         """Review the current game on the board."""
+        if self._observing:
+            self._exit_observe_to_review()
+            return
         if self._coach is None:
             self._set_status("No game to review", error=True)
             return
@@ -2543,6 +2755,8 @@ class ChessGui:
 
     def _start_review(self, board: chess.Board) -> None:
         """Begin post-game review: show progress, launch background analysis."""
+        if self._observing:
+            self._stop_observation()
         if self._in_review_mode:
             self._exit_review_mode()
 
@@ -2742,12 +2956,7 @@ class ChessGui:
         assert self._history_panel is not None
         assert self._eval_panel is not None
 
-        self._suggestions_panel.pack(fill="x", pady=(0, 6))
-        self._btn_frame.pack(fill="x", pady=(0, 4))
-        self._new_game_btn.pack(fill="x", pady=(0, 4))
-        self._pgn_frame.pack(fill="x", pady=(0, 4))
-        if self._entry_frame is not None:
-            self._entry_frame.pack(side="left", fill="y", pady=4)
+        self._set_observe_mode_ui(self._observing)
 
         # Restore board to current coach state.
         if self._coach is not None:

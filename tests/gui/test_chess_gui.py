@@ -8,6 +8,7 @@ from __future__ import annotations
 import queue
 from unittest.mock import MagicMock, patch
 
+import chess
 import pytest
 
 from chesslab.capture.screen_capture import CapturePermissionError
@@ -145,3 +146,88 @@ class TestObserveLiveHelpers:
         assert observer.start.called
         assert gui._set_status.call_args_list[-1].args[0].startswith("Preflight PASS")
         assert "Passive sync only" in gui._set_status.call_args_list[-1].args[0]
+
+    def test_start_observation_switches_ui_to_passive_mode(self) -> None:
+        gui = ChessGui()
+        gui._set_status = MagicMock()
+        gui._coach = MagicMock()
+        gui._coach.move_history = ("e4",)
+        gui._observe_btn = MagicMock()
+        gui._apply_btn = MagicMock()
+        gui._undo_btn = MagicMock()
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._observe_panel = MagicMock()
+        gui._suggestions_panel = MagicMock()
+        gui._history_panel = MagicMock()
+        gui._btn_frame = MagicMock()
+        gui._new_game_btn = MagicMock()
+        gui._pgn_frame = MagicMock()
+        gui._entry_frame = MagicMock()
+        gui._move_entry = MagicMock()
+        gui._submit_btn = MagicMock()
+        gui._observation_queue = queue.Queue()
+
+        config = LiveObserverConfig(
+            monitor_index=1,
+            theme="chess.com-green",
+            setup_id="chesscom_green_white",
+            support_level="official",
+        )
+        observer = MagicMock()
+
+        with patch("chesslab.gui.chess_gui.LiveObserver", return_value=observer):
+            assert gui._start_observation(config) is True
+
+        gui._coach.stop_analysis.assert_called_once()
+        gui._board_widget.set_interactive.assert_called_with(False)
+        gui._move_entry.config.assert_any_call(state="disabled")
+        gui._submit_btn.config.assert_called_with(state="disabled")
+        gui._eval_panel.update_eval.assert_called_with(None, 0, is_loading=False)
+        gui._suggestions_panel.update_suggestions.assert_called_with(())
+        gui._observe_panel.update_session.assert_called_with(
+            setup_label="chesscom_green_white",
+            move_count=1,
+        )
+        assert any(
+            call.kwargs.get("text") == "Manual Coach"
+            for call in gui._apply_btn.config.call_args_list
+        )
+        assert any(
+            call.kwargs.get("text") == "Stop Live"
+            for call in gui._undo_btn.config.call_args_list
+        )
+        assert any(
+            call.kwargs.get("text") == "Review"
+            for call in gui._observe_btn.config.call_args_list
+        )
+
+    def test_submit_san_can_record_passively_without_analysis(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._clear_coaching_outputs = MagicMock()
+        gui._refresh_after_move = MagicMock()
+        gui._set_status = MagicMock()
+
+        gui._submit_san("e4", passive=True)
+
+        gui._coach.record_move.assert_called_once_with("e4")
+        gui._coach.submit_opponent_move_continuous.assert_not_called()
+        gui._clear_coaching_outputs.assert_called_once()
+        gui._refresh_after_move.assert_called_once()
+
+    def test_exit_observe_to_review_stops_live_before_review(self) -> None:
+        gui = ChessGui()
+        gui._set_status = MagicMock()
+        gui._observing = True
+        gui._coach = MagicMock()
+        board = chess.Board()
+        board.push_san("e4")
+        gui._coach.board = board
+        gui._stop_observation = MagicMock()
+        gui._start_review = MagicMock()
+
+        gui._exit_observe_to_review()
+
+        gui._stop_observation.assert_called_once()
+        gui._start_review.assert_called_once_with(board)

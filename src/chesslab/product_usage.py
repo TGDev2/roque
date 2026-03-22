@@ -24,7 +24,8 @@ PRODUCT_PRIORITY_RULE = (
 OBSERVE_LIVE_DIALOG_INTRO = (
     "Select a declared setup, confirm your usage context, run a live "
     "preflight, and start observation only after ChessLab returns a PASS "
-    "verdict."
+    "verdict. Observe Live stays passive: board sync only, with no move "
+    "entry or coaching affordances until you exit intentionally."
 )
 
 OBSERVE_LIVE_GUARDRAIL_TITLE = "Observe Live is for passive sync only"
@@ -33,7 +34,9 @@ OBSERVE_LIVE_GUARDRAIL_BODY = (
     "Use Observe Live for study boards, broadcasts, your own analysis "
     "sessions, or any context that explicitly allows outside tools. Do not "
     "use it to receive engine-backed guidance during an active game if that "
-    "would break platform, event, or fair-play rules."
+    "would break platform, event, or fair-play rules. During observation, "
+    "ChessLab limits itself to passive synchronization and keeps move entry, "
+    "suggestions, and coaching actions separate."
 )
 
 OBSERVE_LIVE_ACKNOWLEDGEMENT = (

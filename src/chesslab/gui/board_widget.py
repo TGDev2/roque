@@ -170,6 +170,7 @@ class BoardWidget(tk.Canvas):
         self._on_move = on_move
 
         self._board = chess.Board()
+        self._interactive = True
         self._selected_square: str | None = None
         self._last_move: tuple[str, str] | None = None
         self._highlighted_squares: list[str] = []
@@ -194,6 +195,13 @@ class BoardWidget(tk.Canvas):
     def set_last_move(self, from_sq: str, to_sq: str) -> None:
         """Set and highlight the last move played."""
         self._last_move = (from_sq, to_sq)
+        self._draw()
+
+    def set_interactive(self, interactive: bool) -> None:
+        """Enable or disable move entry on the board."""
+        self._interactive = interactive
+        if not interactive:
+            self._selected_square = None
         self._draw()
 
     def clear_last_move(self) -> None:
@@ -379,6 +387,9 @@ class BoardWidget(tk.Canvas):
 
     def _on_click(self, event: tk.Event) -> None:  # type: ignore[type-arg]
         """Handle a click on the board canvas."""
+        if not self._interactive:
+            return
+
         sq = coords_to_square(event.x, event.y, self._square_size, self._flipped)
 
         if self._selected_square is None:

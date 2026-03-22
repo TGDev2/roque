@@ -761,6 +761,29 @@ class TestMoveHistory:
 
 
 # ---------------------------------------------------------------------------
+# AC: Passive move recording
+# ---------------------------------------------------------------------------
+
+
+class TestRecordMove:
+    """record_move updates the board without triggering analysis."""
+
+    def test_records_legal_moves_without_engine_analysis(self) -> None:
+        coach, mock_engine = _make_coach_with_mock()
+
+        assert coach.record_move("e4") == "e4"
+        assert coach.record_move("e5") == "e5"
+        assert coach.move_history == ("e4", "e5")
+        assert mock_engine.analyse.call_count == 0
+
+    def test_illegal_move_is_rejected(self) -> None:
+        coach, _ = _make_coach_with_mock()
+
+        with pytest.raises(IllegalMoveError):
+            coach.record_move("Zz9")
+
+
+# ---------------------------------------------------------------------------
 # Board property and load_board
 # ---------------------------------------------------------------------------
 
