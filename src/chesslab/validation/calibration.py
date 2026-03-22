@@ -97,6 +97,9 @@ def run_preflight_calibration(
         )
     )
 
+    warmup_frame = _read_image(image_paths[0])
+    processor.process_frame(warmup_frame)
+
     expected_theme = profile.expected_theme_id
 
     detections = 0

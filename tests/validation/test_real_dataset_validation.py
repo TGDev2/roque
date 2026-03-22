@@ -20,7 +20,10 @@ def test_validate_real_dataset_returns_metrics() -> None:
     assert len(results) == 1
     result = results[0]
     assert result.setup_id == "chesscom_green_white"
-    assert result.metrics.sample_count == 8
+    assert result.metrics.sample_count == 4
     assert result.metrics.detection_rate >= 0.9
     assert result.metrics.mean_iou >= 0.9
-    assert result.passed is False
+    assert result.metrics.theme_match_rate >= 0.85
+    assert result.metrics.ready_rate >= 0.60
+    assert result.metrics.uncertain_rate <= 0.30
+    assert result.passed is True

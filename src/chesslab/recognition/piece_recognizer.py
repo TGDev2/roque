@@ -1,8 +1,8 @@
 """Piece recognition module for classifying chess pieces on board squares.
 
-Uses OpenCV template matching to identify piece type (king, queen, rook,
-bishop, knight, pawn) and colour (white, black) on each of the 64 squares,
-supporting multiple graphical themes via loadable template libraries.
+Matches real or synthetic board squares against theme templates while
+normalising square backgrounds, suppressing coordinate labels, and applying
+an explicit empty-square heuristic before scoring piece candidates.
 """
 
 from __future__ import annotations
@@ -162,7 +162,10 @@ class PieceRecognizer:
     performance.
     """
 
-    _EMPTY_SPATIAL_STD_THRESHOLD: float = 3.0
+    _EMPTY_OCCUPANCY_THRESHOLD: float = 0.03
+    _FOREGROUND_DISTANCE_THRESHOLD: float = 20.0
+    _BACKGROUND_NORMALIZATION_DISTANCE_THRESHOLD: float = 28.0
+    _LABEL_CLEANUP_DISTANCE_THRESHOLD: float = 10.0
 
     def __init__(self, config: RecognitionConfig | None = None) -> None:
         self._config = config or RecognitionConfig()
@@ -174,10 +177,11 @@ class PieceRecognizer:
             "dark": {},
         }
         self._load_theme(self._config.theme)
+        self._canonical_backgrounds = self._estimate_canonical_backgrounds()
 
-        # Precomputed normalised template matrices, keyed by background.
-        # Each value is (piece_list, normed_matrix) where normed_matrix has
-        # shape (num_templates, h*w*channels) with zero-mean unit-variance rows.
+        # Precomputed feature matrices, keyed by background.
+        # Each value is (piece_list, feature_matrix) where feature_matrix has
+        # shape (num_templates, h*w*2) with unit-normalized rows.
         self._normed: dict[str, tuple[list[PieceType], NDArray[np.float32]]] = {}
         self._cached_size: tuple[int, int] | None = None
 
@@ -218,12 +222,76 @@ class PieceRecognizer:
 
         classifications: dict[str, SquareClassification] = {}
         uncertain_names: list[str] = []
+        pending_by_background: dict[str, list[tuple[str, NDArray[np.float32]]]] = {
+            "light": [],
+            "dark": [],
+        }
 
         for name, square in squares.items():
-            cls = self._classify_square(square)
-            classifications[name] = cls
-            if cls.low_confidence:
-                uncertain_names.append(name)
+            prepared = self._prepare_square_image(square)
+            background = square_background(square.file, square.rank)
+            canonical_background = self._canonical_backgrounds[background]
+            occupancy_ratio = self._occupancy_ratio(prepared, canonical_background)
+
+            if occupancy_ratio <= self._EMPTY_OCCUPANCY_THRESHOLD:
+                classifications[name] = SquareClassification(
+                    square_name=name,
+                    piece=PieceType.EMPTY,
+                    confidence=1.0,
+                    low_confidence=False,
+                )
+                continue
+
+            pending_by_background[background].append(
+                (
+                    name,
+                    self._build_feature_vector(
+                        prepared,
+                        canonical_background=canonical_background,
+                    ),
+                )
+            )
+
+        for background, pending in pending_by_background.items():
+            if not pending:
+                continue
+
+            pieces, matrix = self._normed.get(
+                background,
+                ([], np.empty((0, 0), dtype=np.float32)),
+            )
+            if len(pieces) == 0:
+                for name, _ in pending:
+                    classifications[name] = SquareClassification(
+                        square_name=name,
+                        piece=PieceType.EMPTY,
+                        confidence=0.0,
+                        low_confidence=True,
+                    )
+                    uncertain_names.append(name)
+                continue
+
+            feature_matrix = np.vstack([vector for _, vector in pending])
+            scores = feature_matrix @ matrix.T
+            best_indices = np.argmax(scores, axis=1)
+            best_scores = scores[np.arange(len(pending)), best_indices]
+
+            for (name, _), best_idx, best_score in zip(
+                pending,
+                best_indices.tolist(),
+                best_scores.tolist(),
+            ):
+                piece = pieces[int(best_idx)]
+                score = float(best_score)
+                low_confidence = score < self._config.confidence_threshold
+                classifications[name] = SquareClassification(
+                    square_name=name,
+                    piece=piece,
+                    confidence=max(0.0, score),
+                    low_confidence=low_confidence,
+                )
+                if low_confidence:
+                    uncertain_names.append(name)
 
         elapsed = (time.perf_counter() - start) * 1000
 
@@ -358,11 +426,11 @@ class PieceRecognizer:
     # -- Template preparation ------------------------------------------------
 
     def _ensure_resized(self, target_h: int, target_w: int) -> None:
-        """Resize templates to *(target_h, target_w)* and precompute normed vectors."""
+        """Resize templates to *(target_h, target_w)* and precompute feature vectors."""
         if self._cached_size == (target_h, target_w):
             return
 
-        n_pixels = target_h * target_w * 3
+        n_pixels = target_h * target_w * 2
         self._normed = {}
 
         for bg in ("light", "dark"):
@@ -378,11 +446,10 @@ class PieceRecognizer:
                 resized = cv2.resize(
                     img, (target_w, target_h), interpolation=interpolation,
                 )
-                vec = resized.flatten().astype(np.float32)
-                vec -= vec.mean()
-                std = float(np.std(vec))
-                if std > 1e-6:
-                    vec /= std
+                vec = self._build_feature_vector(
+                    resized,
+                    canonical_background=self._canonical_backgrounds[bg],
+                )
                 pieces.append(piece)
                 rows.append(vec)
 
@@ -396,16 +463,12 @@ class PieceRecognizer:
 
     def _classify_square(self, square: SquareImage) -> SquareClassification:
         """Classify a single square image."""
-        image = square.image
-        # Ensure BGR (strip alpha if BGRA).
-        if image.ndim == 3 and image.shape[2] == 4:
-            image = image[:, :, :3]
+        image = self._prepare_square_image(square)
+        background = square_background(square.file, square.rank)
+        canonical_background = self._canonical_backgrounds[background]
 
-        # Check spatial variance: if all pixels are nearly the same colour,
-        # the square is empty (solid background).
-        pixels = image.reshape(-1, 3).astype(np.float32)
-        spatial_std = float(np.std(pixels, axis=0).max())
-        if spatial_std < self._EMPTY_SPATIAL_STD_THRESHOLD:
+        occupancy_ratio = self._occupancy_ratio(image, canonical_background)
+        if occupancy_ratio <= self._EMPTY_OCCUPANCY_THRESHOLD:
             return SquareClassification(
                 square_name=square.name,
                 piece=PieceType.EMPTY,
@@ -413,17 +476,14 @@ class PieceRecognizer:
                 low_confidence=False,
             )
 
-        # Flatten and normalise for cross-correlation.
-        img_vec = image.flatten().astype(np.float32)
-        img_vec -= img_vec.mean()
-        std = float(np.std(img_vec))
-        if std < 1e-6:
-            img_vec[:] = 0.0
-        else:
-            img_vec /= std
-
-        bg = square_background(square.file, square.rank)
-        pieces, matrix = self._normed.get(bg, ([], np.empty((0,), dtype=np.float32)))
+        img_vec = self._build_feature_vector(
+            image,
+            canonical_background=canonical_background,
+        )
+        pieces, matrix = self._normed.get(
+            background,
+            ([], np.empty((0, 0), dtype=np.float32)),
+        )
 
         if len(pieces) == 0:
             return SquareClassification(
@@ -433,9 +493,7 @@ class PieceRecognizer:
                 low_confidence=True,
             )
 
-        # Normalised cross-correlation: dot product of unit-variance vectors
-        # divided by the number of elements.
-        scores = matrix @ img_vec / len(img_vec)
+        scores = matrix @ img_vec
 
         best_idx = int(np.argmax(scores))
         best_score = float(scores[best_idx])
@@ -458,3 +516,133 @@ class PieceRecognizer:
             confidence=best_score,
             low_confidence=False,
         )
+
+    def _estimate_canonical_backgrounds(self) -> dict[str, NDArray[np.uint8]]:
+        """Estimate one canonical background colour per square colour."""
+        colours: dict[str, NDArray[np.uint8]] = {}
+        for background, templates in self._templates.items():
+            samples: list[NDArray[np.float32]] = []
+            for image in templates.values():
+                samples.append(self._estimate_background_colour(image))
+            colours[background] = np.median(np.stack(samples), axis=0).astype(np.uint8)
+        return colours
+
+    @classmethod
+    def _estimate_background_colour(cls, image: NDArray[np.uint8]) -> NDArray[np.float32]:
+        """Estimate a square's background colour from its borders."""
+        bgr = cls._ensure_bgr(image)
+        h, w = bgr.shape[:2]
+        border = max(4, min(h, w) // 20)
+        border_pixels = np.concatenate(
+            [
+                bgr[:border, :, :].reshape(-1, 3),
+                bgr[h - border :, :, :].reshape(-1, 3),
+                bgr[:, :border, :].reshape(-1, 3),
+                bgr[:, w - border :, :].reshape(-1, 3),
+            ],
+            axis=0,
+        ).astype(np.float32)
+        return np.median(border_pixels, axis=0)
+
+    @staticmethod
+    def _ensure_bgr(image: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        """Return a 3-channel BGR view of *image*."""
+        if image.ndim == 3 and image.shape[2] == 4:
+            return image[:, :, :3]
+        return image
+
+    def _prepare_square_image(self, square: SquareImage) -> NDArray[np.uint8]:
+        """Normalize a live square before feature extraction."""
+        image = self._ensure_bgr(square.image).copy()
+        background = square_background(square.file, square.rank)
+        target_background = self._canonical_backgrounds[background]
+        source_background = self._estimate_background_colour(image).astype(np.uint8)
+
+        self._clean_coordinate_overlays(
+            image,
+            square=square,
+            source_background=source_background,
+        )
+
+        distance = np.linalg.norm(
+            image.astype(np.float32) - source_background.astype(np.float32),
+            axis=2,
+        )
+        background_mask = distance <= self._BACKGROUND_NORMALIZATION_DISTANCE_THRESHOLD
+        image[background_mask] = target_background
+        return image
+
+    def _build_feature_vector(
+        self,
+        image: NDArray[np.uint8],
+        *,
+        canonical_background: NDArray[np.uint8],
+    ) -> NDArray[np.float32]:
+        """Build a unit-normalized shape+appearance feature vector."""
+        bgr = self._ensure_bgr(image)
+        background = canonical_background.astype(np.float32)
+        residual = bgr.astype(np.float32) - background
+        magnitude = np.linalg.norm(residual, axis=2)
+        foreground = magnitude > self._FOREGROUND_DISTANCE_THRESHOLD
+
+        gray = residual.mean(axis=2)
+        mask = foreground.astype(np.float32) * 255.0
+        vec = np.stack([gray, mask], axis=2).reshape(-1)
+        norm = float(np.linalg.norm(vec))
+        if norm > 1e-6:
+            vec /= norm
+        else:
+            vec[:] = 0.0
+        return vec
+
+    def _occupancy_ratio(
+        self,
+        image: NDArray[np.uint8],
+        canonical_background: NDArray[np.uint8],
+    ) -> float:
+        """Estimate how much of the inner square is occupied by a piece."""
+        bgr = self._ensure_bgr(image)
+        h, w = bgr.shape[:2]
+        if min(h, w) < 64:
+            inner = bgr.reshape(-1, 3)
+        else:
+            margin = max(4, min(h, w) // 10)
+            inner = bgr[margin : h - margin, margin : w - margin].reshape(-1, 3)
+        distance = np.linalg.norm(
+            inner.astype(np.float32) - canonical_background.astype(np.float32),
+            axis=1,
+        )
+        return float((distance > self._FOREGROUND_DISTANCE_THRESHOLD).mean())
+
+    def _clean_coordinate_overlays(
+        self,
+        image: NDArray[np.uint8],
+        *,
+        square: SquareImage,
+        source_background: NDArray[np.uint8],
+    ) -> None:
+        """Remove chess.com coordinate overlays from known board corners."""
+        h, w = image.shape[:2]
+        if min(h, w) < 64:
+            return
+        background = source_background.astype(np.float32)
+
+        if square.file == 0:
+            zone = image[: max(1, h // 4), : max(1, w // 6)]
+            distance = np.linalg.norm(
+                zone.astype(np.float32) - background,
+                axis=2,
+            )
+            foreground = distance > self._LABEL_CLEANUP_DISTANCE_THRESHOLD
+            if float(foreground.mean()) <= 0.20:
+                zone[foreground] = source_background
+
+        if square.rank == 0:
+            zone = image[h - max(1, h // 4) :, w - max(1, w // 6) :]
+            distance = np.linalg.norm(
+                zone.astype(np.float32) - background,
+                axis=2,
+            )
+            foreground = distance > self._LABEL_CLEANUP_DISTANCE_THRESHOLD
+            if float(foreground.mean()) <= 0.20:
+                zone[foreground] = source_background

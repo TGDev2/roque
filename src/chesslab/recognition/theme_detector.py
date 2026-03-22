@@ -98,6 +98,9 @@ class ThemeDetector:
     using Euclidean distance in BGR space.
     """
 
+    _FOREGROUND_DISTANCE_THRESHOLD: float = 20.0
+    _LOW_OCCUPANCY_THRESHOLD: float = 0.03
+
     def __init__(self, config: ThemeDetectionConfig | None = None) -> None:
         self._config = config or ThemeDetectionConfig()
         self._signatures = self._load_signatures()
@@ -328,16 +331,25 @@ class ThemeDetector:
         Returns:
             Tuple of (light_bgr, dark_bgr) as float64 arrays of shape (3,).
         """
-        patch = self._config.corner_patch_size
-        light_colours: list[NDArray[np.float64]] = []
-        dark_colours: list[NDArray[np.float64]] = []
+        clean_light: list[NDArray[np.float64]] = []
+        clean_dark: list[NDArray[np.float64]] = []
+        fallback_light: list[NDArray[np.float64]] = []
+        fallback_dark: list[NDArray[np.float64]] = []
 
         for square in squares.values():
-            colour = self._sample_corner_colour(square.image, patch)
+            colour = self._estimate_square_background(square.image)
+            occupancy = self._estimate_occupancy_ratio(square.image, colour)
             if square_background(square.file, square.rank) == "light":
-                light_colours.append(colour)
+                fallback_light.append(colour)
+                if occupancy <= self._LOW_OCCUPANCY_THRESHOLD:
+                    clean_light.append(colour)
             else:
-                dark_colours.append(colour)
+                fallback_dark.append(colour)
+                if occupancy <= self._LOW_OCCUPANCY_THRESHOLD:
+                    clean_dark.append(colour)
+
+        light_colours = clean_light or fallback_light
+        dark_colours = clean_dark or fallback_dark
 
         if not light_colours or not dark_colours:
             raise ValueError(
@@ -347,6 +359,50 @@ class ThemeDetector:
         light_median = np.median(np.stack(light_colours), axis=0)
         dark_median = np.median(np.stack(dark_colours), axis=0)
         return light_median, dark_median
+
+    @classmethod
+    def _estimate_square_background(cls, image: NDArray[np.uint8]) -> NDArray[np.float64]:
+        """Estimate the background colour from border pixels."""
+        img = image
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = img[:, :, :3]
+        if img.ndim != 3 or img.shape[2] != 3:
+            raise ValueError(f"Expected image shape (H, W, 3|4), got {image.shape}.")
+
+        h, w = img.shape[:2]
+        border = max(4, min(h, w) // 20)
+        border_pixels = np.concatenate(
+            [
+                img[:border, :, :].reshape(-1, 3),
+                img[h - border :, :, :].reshape(-1, 3),
+                img[:, :border, :].reshape(-1, 3),
+                img[:, w - border :, :].reshape(-1, 3),
+            ],
+            axis=0,
+        ).astype(np.float64)
+        return np.median(border_pixels, axis=0)
+
+    @classmethod
+    def _estimate_occupancy_ratio(
+        cls,
+        image: NDArray[np.uint8],
+        background: NDArray[np.float64],
+    ) -> float:
+        """Estimate the amount of foreground inside the square centre."""
+        img = image
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = img[:, :, :3]
+        if img.ndim != 3 or img.shape[2] != 3:
+            raise ValueError(f"Expected image shape (H, W, 3|4), got {image.shape}.")
+
+        h, w = img.shape[:2]
+        margin = max(8, min(h, w) // 10)
+        inner = img[margin : h - margin, margin : w - margin].reshape(-1, 3)
+        distance = np.linalg.norm(
+            inner.astype(np.float64) - background.astype(np.float64),
+            axis=1,
+        )
+        return float((distance > cls._FOREGROUND_DISTANCE_THRESHOLD).mean())
 
     @staticmethod
     def _sample_corner_colour(

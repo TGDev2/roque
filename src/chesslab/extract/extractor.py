@@ -107,6 +107,47 @@ def _estimate_background_colours(
     return colours
 
 
+def _clean_coordinate_overlays(
+    square: SquareImage,
+    *,
+    background: np.ndarray,
+) -> np.ndarray:
+    """Remove board coordinates from extracted template corners."""
+    image = _ensure_bgr(square.image).copy()
+    h, w = image.shape[:2]
+    if min(h, w) < 64:
+        return image
+    bg = background.astype(np.float32)
+
+    if square.file == 0:
+        zone = image[: max(1, h // 4), : max(1, w // 6)]
+        distance = np.linalg.norm(zone.astype(np.float32) - bg, axis=2)
+        foreground = distance > 10.0
+        if float(foreground.mean()) <= 0.20:
+            zone[foreground] = background
+
+    if square.rank == 0:
+        zone = image[h - max(1, h // 4) :, w - max(1, w // 6) :]
+        distance = np.linalg.norm(zone.astype(np.float32) - bg, axis=2)
+        foreground = distance > 10.0
+        if float(foreground.mean()) <= 0.20:
+            zone[foreground] = background
+
+    return image
+
+
+def _template_candidate_score(square: SquareImage) -> float:
+    """Score extraction candidates, preferring clean central samples."""
+    score = 0.0
+    if square.file == 0:
+        score += 10.0
+    if square.rank == 0:
+        score += 10.0
+    score += abs(square.file - 3.5)
+    score += abs(square.rank - 3.5)
+    return score
+
+
 def _synthesise_background(
     source: np.ndarray,
     *,
@@ -203,15 +244,25 @@ class TemplateExtractor:
         )
 
         # Extract templates from known start position squares.
-        templates: dict[str, np.ndarray] = {}
+        template_candidates: dict[str, list[tuple[float, SquareImage]]] = {}
         for name, square in squares.items():
             piece = START_POSITION.get(name)
             if piece is None:
                 continue
             bg = square_background(square.file, square.rank)
             key = f"{piece}_{bg}"
-            if key not in templates:
-                templates[key] = _ensure_bgr(square.image)
+            template_candidates.setdefault(key, []).append(
+                (_template_candidate_score(square), square)
+            )
+
+        templates: dict[str, np.ndarray] = {}
+        for key, candidates in template_candidates.items():
+            _, square = min(candidates, key=lambda item: item[0])
+            bg = square_background(square.file, square.rank)
+            templates[key] = _clean_coordinate_overlays(
+                square,
+                background=bg_colours[bg],
+            )
 
         # Synthesise missing background variants.
         synthesised = 0

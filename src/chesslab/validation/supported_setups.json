@@ -7,9 +7,9 @@
       "site_theme": "green",
       "perspective": "white",
       "template_theme": "chess.com-green",
-      "support_level": "candidate",
+      "support_level": "official",
       "template_quality": "real",
-      "notes": "Primary setup for live mode. Requires a preflight calibration check before starting a session.",
+      "notes": "Official reference setup for live mode. Run preflight calibration before starting a session.",
       "dataset_manifest": "tests/integration/fixtures/real_setups_manifest.json",
       "preflight_thresholds": {
         "min_detection_rate": 0.90,

@@ -1,6 +1,6 @@
 {
   "name": "chess.com-green",
-  "description": "Auto-extracted from a starting-position screenshot (test_board.png).",
+  "description": "Auto-extracted from a starting-position screenshot (chesscom_001.png).",
   "templates": {
     "bB_dark": "bB_dark.png",
     "bB_light": "bB_light.png",

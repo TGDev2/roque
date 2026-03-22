@@ -215,6 +215,11 @@ def _validate_profile_samples(
         )
     )
 
+    warmup_frame = cv2.imread(str(samples[0].image_path), cv2.IMREAD_UNCHANGED)
+    if warmup_frame is None:
+        raise ValueError(f"Unable to read sample image: {samples[0].image_path}")
+    processor.process_frame(warmup_frame)
+
     detections = 0
     ious: list[float] = []
     theme_matches = 0

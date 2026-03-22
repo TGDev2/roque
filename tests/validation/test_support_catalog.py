@@ -17,11 +17,12 @@ def test_default_catalog_loads_profiles() -> None:
     assert catalog.get_profile("chesscom_green_white") is not None
 
 
-def test_candidate_profile_has_thresholds() -> None:
+def test_official_profile_has_thresholds() -> None:
     catalog = load_support_catalog()
     profile = catalog.get_profile("chesscom_green_white")
 
     assert profile is not None
+    assert profile.is_official is True
     assert profile.preflight_thresholds.min_detection_rate >= 0.9
     assert profile.dataset_thresholds is not None
 
