@@ -17,6 +17,7 @@ from chesslab.splitting.board_splitter import BoardSplitter
 from chesslab.validation.catalog import SetupSupportProfile, SupportCatalog
 
 _LATENCY_JITTER_MS = 5.0
+_MIN_REPORTED_LATENCY_MS = 0.001
 
 
 @dataclass(frozen=True)
@@ -412,7 +413,10 @@ def _p95(values: Sequence[float]) -> float:
         return 0.0
     ordered = sorted(float(v) for v in values)
     idx = max(0, math.ceil(0.95 * len(ordered)) - 1)
-    return ordered[idx]
+    # Some OpenCV stages complete faster than the platform timer resolution.
+    # Keep a tiny positive floor so dataset/preflight contracts do not flap
+    # between 0 and a small non-zero measurement.
+    return max(ordered[idx], _MIN_REPORTED_LATENCY_MS)
 
 
 def _latency_exceeds(value_ms: float, threshold_ms: float) -> bool:

@@ -1286,7 +1286,10 @@ class ChessGui:
                 support_badge.config(text="SETUP", bg=_BTN_BG, fg=_FG)
                 summary_label.config(text="No declared setup available.")
                 support_copy_label.config(
-                    text="Observe Live now starts from declared setup profiles."
+                    text=(
+                        "Observe Live uses a narrow live perimeter built from "
+                        "declared real-template setups."
+                    )
                 )
                 expected_label.config(text="")
                 notes_label.config(text=assistant_error or "")
@@ -1549,13 +1552,14 @@ class ChessGui:
             )
         if normalized == "candidate":
             return (
-                "Candidate setup. Validate with preflight before every "
+                "Evidence-backed candidate setup. Real captures exist, but this "
+                "path is not official yet. Validate with preflight before every "
                 "permitted live session."
             )
         if normalized == "experimental":
             return (
-                "Experimental setup. Use for testing only and expect "
-                "calibration failures."
+                "Experimental setup. Not recommended for Observe Live routine "
+                "use and likely to fail calibration."
             )
         return "Support level unknown. Treat this setup as unverified."
 

@@ -20,6 +20,12 @@ Each profile defines:
 - preflight calibration thresholds
 - optional real-dataset thresholds + manifest path
 
+Current user-facing Observe Live perimeter:
+
+- `chesscom_green_white`: `official` reference setup and the only currently recommended routine live path.
+- `chesscom_green_black`: `candidate` setup with real in-repo captures; validation evidence is tracked, but promotion remains blocked until the dataset contract passes consistently.
+- synthetic-template profiles remain in the catalog for engineering experiments and are not presented as recommended Observe Live setups.
+
 List profiles:
 
 ```bash
@@ -81,7 +87,7 @@ PYTHONPATH=src ./.venv/bin/python -m chesslab.validation validate-real \
 2. Add/update setup profile in `supported_setups.json`.
 3. Build/annotate a real-capture manifest for this setup.
 4. Run `preflight` repeatedly until stable PASS on representative captures.
-5. Run `validate-real` and check thresholds.
+5. Run `validate-real` and check thresholds. Candidate setups may keep failing here; that evidence is still valuable and should drive status/notes until the contract passes.
 6. Promote `support_level` from `candidate` to `official` only after dataset
    thresholds pass consistently.
 

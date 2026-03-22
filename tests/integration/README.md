@@ -66,5 +66,6 @@ CHESSLAB_REAL_SETUPS_MANIFEST=/abs/path/to/real_setups_manifest.json ./.venv/bin
 - split latency < 50 ms per sample
 
 Setup-aware validation measures additional E2E metrics (`ready_rate`, uncertainty,
-invalid positions, and p95 stage latencies) and evaluates thresholds declared in
-the support catalog for setups marked as `official`.
+invalid positions, and p95 stage latencies). Any setup that declares a dataset
+contract is measured against its thresholds; setups marked as `official` must
+pass, while `candidate` setups expose proof-backed gaps before promotion.

@@ -48,7 +48,7 @@ def _make_report() -> CalibrationReport:
     )
 
 
-def test_list_options_prioritizes_official_profiles() -> None:
+def test_list_options_prioritizes_official_profiles_and_hides_synthetic_setups() -> None:
     assistant = LiveSetupAssistant(catalog=load_support_catalog())
 
     options = assistant.list_options()
@@ -56,7 +56,12 @@ def test_list_options_prioritizes_official_profiles() -> None:
     assert options
     assert options[0].profile_id == "chesscom_green_white"
     assert options[0].support_label == "OFFICIAL"
-    assert any(option.profile_id == "chesscom_green_black" for option in options)
+    assert options[0].recommended is True
+    assert [option.profile_id for option in options] == [
+        "chesscom_green_white",
+        "chesscom_green_black",
+    ]
+    assert all(option.template_quality == "real" for option in options)
 
 
 def test_build_observer_config_uses_declared_profile() -> None:

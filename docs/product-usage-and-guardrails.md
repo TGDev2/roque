@@ -33,6 +33,7 @@ Use Review after the game. Review is for learning from completed PGNs, classifyi
 ## Product guardrails
 
 - Observe Live starts from declared setup profiles only.
+- Observe Live intentionally exposes a narrow user-facing setup list: only real-template `official` and `candidate` profiles.
 - Observe Live requires a preflight PASS before launch.
 - Observe Live requires an explicit acknowledgement that the session allows passive observation and outside tools.
 - Review copy and launcher copy should keep describing review as post-game analysis.

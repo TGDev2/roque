@@ -66,7 +66,7 @@ class LiveSetupOption:
             template_theme=profile.template_theme,
             template_quality=profile.template_quality,
             notes=profile.notes,
-            recommended=profile.support_level is SupportLevel.OFFICIAL,
+            recommended=profile.is_recommended,
         )
 
 
@@ -86,7 +86,7 @@ class LiveSetupAssistant:
 
     def list_options(self) -> tuple[LiveSetupOption, ...]:
         """Return calibration-capable setup options in UX-friendly order."""
-        profiles = sorted(self._catalog.calibration_profiles(), key=_profile_sort_key)
+        profiles = sorted(self._catalog.live_profiles(), key=_profile_sort_key)
         return tuple(LiveSetupOption.from_profile(profile) for profile in profiles)
 
     def get_profile(self, profile_id: str) -> SetupSupportProfile | None:

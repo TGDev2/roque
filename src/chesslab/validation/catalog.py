@@ -74,6 +74,18 @@ class SetupSupportProfile:
     def is_official(self) -> bool:
         return self.support_level is SupportLevel.OFFICIAL
 
+    @property
+    def uses_real_templates(self) -> bool:
+        return self.template_quality == "real"
+
+    @property
+    def has_real_dataset(self) -> bool:
+        return self.dataset_manifest is not None
+
+    @property
+    def is_recommended(self) -> bool:
+        return self.is_official and self.uses_real_templates
+
 
 @dataclass(frozen=True)
 class SupportCatalog:
@@ -99,6 +111,18 @@ class SupportCatalog:
                 SupportLevel.OFFICIAL,
                 SupportLevel.CANDIDATE,
                 SupportLevel.EXPERIMENTAL,
+            }
+        )
+
+    def live_profiles(self) -> tuple[SetupSupportProfile, ...]:
+        """Return the narrow user-facing Observe Live perimeter."""
+        return tuple(
+            profile
+            for profile in self.profiles
+            if profile.uses_real_templates
+            and profile.support_level in {
+                SupportLevel.OFFICIAL,
+                SupportLevel.CANDIDATE,
             }
         )
 

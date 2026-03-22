@@ -54,38 +54,6 @@
           }
         }
       ]
-    },
-    {
-      "setup_id": "chesscom_walnut_white",
-      "samples": [
-        {
-          "image": "images/chesscom_006.png",
-          "board": {
-            "x": 326,
-            "y": 64,
-            "width": 944,
-            "height": 944
-          }
-        },
-        {
-          "image": "images/chesscom_007.png",
-          "board": {
-            "x": 326,
-            "y": 64,
-            "width": 944,
-            "height": 944
-          }
-        },
-        {
-          "image": "images/chesscom_008.png",
-          "board": {
-            "x": 326,
-            "y": 64,
-            "width": 944,
-            "height": 944
-          }
-        }
-      ]
     }
   ]
 }

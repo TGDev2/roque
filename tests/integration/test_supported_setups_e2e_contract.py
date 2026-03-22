@@ -30,10 +30,17 @@ def test_real_setups_manifest_measures_e2e_metrics() -> None:
     )
 
     assert results, "Real setup manifest is empty."
+    profiles_by_id = {profile.id: profile for profile in catalog.profiles}
     for result in results:
+        profile = profiles_by_id[result.setup_id]
         assert result.metrics.sample_count > 0
         assert result.metrics.p95_total_latency_ms > 0.0
         assert result.metrics.p95_detection_latency_ms > 0.0
+        if profile.has_real_dataset:
+            assert (
+                "No dataset thresholds configured for this setup in support catalog."
+                not in result.failures
+            )
 
     official_ids = {
         profile.id

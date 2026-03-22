@@ -47,7 +47,7 @@ PYTHONPATH=src ./.venv/bin/python scripts/remote_live.py \
 
 Notes:
 
-- `chess.com-green` is the recommended template theme.
+- `chess.com-green` is the only template family currently exposed in the narrow Observe Live perimeter.
 - Use `--black-perspective` if the board is flipped.
 - Use `--allow-uncertain` only if you want a FEN even when recognition confidence is low.
 
@@ -133,6 +133,9 @@ detected.
 - Keep the board large and fully visible.
 - Avoid overlays or browser zoom changes while calibrating.
 - Start with `-SelectRegion` or a cropped region around the browser window if full-screen capture is noisy.
+- Treat `chesscom_green_white` as the only officially recommended live setup today.
+- Treat `chesscom_green_black` as an evidence-backed candidate: a real dataset exists, but current validation still blocks promotion.
+- Do not treat synthetic-template themes as recommended live setups.
 - Promote a setup to `official` only after it passes real-dataset validation:
 
 ```bash
