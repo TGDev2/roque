@@ -77,6 +77,11 @@ class LiveObserverConfig:
     enable_game_tracking:
         When ``True``, the observer maintains a :class:`LiveGameTracker`
         that tracks moves and game state automatically.
+    setup_id:
+        Identifier of the declared support-catalog setup used to launch
+        live observation.
+    support_level:
+        Declared support maturity level for the selected setup.
     """
 
     monitor_index: int = 1
@@ -85,6 +90,8 @@ class LiveObserverConfig:
     capture_interval_ms: int = 500
     debounce_ms: int = 300
     enable_game_tracking: bool = False
+    setup_id: str | None = None
+    support_level: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -226,10 +233,11 @@ class LiveObserver:
             self._last_error_signature = None
 
         logger.info(
-            "LiveObserver started: monitor=%d theme=%s tracking=%s",
+            "LiveObserver started: monitor=%d theme=%s tracking=%s setup=%s",
             self._config.monitor_index,
             self._config.theme,
             self._tracker is not None,
+            self._config.setup_id or "(manual)",
         )
 
     def stop(self) -> None:

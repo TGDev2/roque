@@ -51,6 +51,7 @@ from chesslab.capture.screen_capture import (
     ScreenCaptureError,
 )
 from chesslab.gui.board_widget import BoardWidget
+from chesslab.gui.live_setup_assistant import LiveSetupAssistant
 from chesslab.gui.live_observer import (
     LiveObserver,
     LiveObserverConfig,
@@ -74,6 +75,7 @@ from chesslab.review.game_reviewer import (
     ReviewCancelledError,
     ReviewConfig,
 )
+from chesslab.validation import CalibrationReport, SetupSupportProfile, SupportCatalogError
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +235,7 @@ class ChessGui:
         self._observation_queue: queue.Queue[ObservationEvent] = queue.Queue()
         self._observing: bool = False
         self._last_observer_config: LiveObserverConfig | None = None
+        self._live_setup_assistant: LiveSetupAssistant | None = None
 
         # Persistence.
         self._storage = GameStorage()
@@ -874,23 +877,21 @@ class ChessGui:
 
     # -- Live observation ----------------------------------------------------
 
-    _KNOWN_THEMES = (
-        "chess.com/green",
-        "chess.com/brown",
-        "chess.com/blue",
-        "chess.com/purple",
-        "chess.com/walnut",
-        "lichess/brown",
-        "lichess/blue",
-        "lichess/green",
-    )
-
     def _show_observe_dialog(
         self,
         parent: tk.Tk,
     ) -> LiveObserverConfig | None:
-        """Show a dialog to configure live observation settings."""
+        """Show a setup-driven dialog for live observation."""
         result: list[LiveObserverConfig | None] = [None]
+        assistant: LiveSetupAssistant | None
+        assistant_error: str | None = None
+        try:
+            assistant = self._get_live_setup_assistant()
+            setup_options = assistant.list_options()
+        except SupportCatalogError as exc:
+            assistant = None
+            setup_options = ()
+            assistant_error = f"Setup catalog unavailable: {exc}"
 
         dialog = tk.Toplevel(parent)
         dialog.title("Live Observation")
@@ -905,7 +906,20 @@ class ChessGui:
         tk.Label(
             container, text="Live Observation", bg=_BG, fg=_FG,
             font=("sans-serif", 18, "bold"),
-        ).pack(pady=(0, 16))
+        ).pack(pady=(0, 6))
+
+        tk.Label(
+            container,
+            text=(
+                "Choose a declared setup, run a live preflight, and start "
+                "observation only after ChessLab returns a PASS verdict."
+            ),
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=500,
+        ).pack(fill="x", pady=(0, 14))
 
         # Monitor selector.
         monitor_card = tk.Frame(container, bg=_CARD_BORDER)
@@ -974,98 +988,365 @@ class ChessGui:
                 wraplength=360,
             ).pack(fill="x", padx=12, pady=(0, 8))
 
-        # Theme selector.
-        theme_card = tk.Frame(container, bg=_CARD_BORDER)
-        theme_card.pack(fill="x", pady=(0, 12))
-        theme_inner = tk.Frame(theme_card, bg=_BG_SECONDARY)
-        theme_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        # Declared setup selector.
+        setup_card = tk.Frame(container, bg=_CARD_BORDER)
+        setup_card.pack(fill="x", pady=(0, 12))
+        setup_inner = tk.Frame(setup_card, bg=_BG_SECONDARY)
+        setup_inner.pack(fill="both", expand=True, padx=1, pady=1)
 
         tk.Label(
-            theme_inner, text="Board Theme", bg=_BG_SECONDARY, fg=_FG,
+            setup_inner, text="Declared Setup", bg=_BG_SECONDARY, fg=_FG,
             font=("sans-serif", 11, "bold"), anchor="w",
         ).pack(fill="x", padx=12, pady=(10, 4))
 
-        default_theme = self._KNOWN_THEMES[0]
-        if (
-            self._last_observer_config is not None
-            and self._last_observer_config.theme in self._KNOWN_THEMES
-        ):
-            default_theme = self._last_observer_config.theme
+        option_by_label = {option.label: option for option in setup_options}
+        setup_labels = list(option_by_label) or ["No declared setups available"]
+        default_setup_label = setup_labels[0]
+        if self._last_observer_config is not None and self._last_observer_config.setup_id:
+            for option in setup_options:
+                if option.profile_id == self._last_observer_config.setup_id:
+                    default_setup_label = option.label
+                    break
 
-        theme_var = tk.StringVar(value=default_theme)
-        theme_menu = tk.OptionMenu(theme_inner, theme_var, *self._KNOWN_THEMES)
-        theme_menu.config(
+        setup_var = tk.StringVar(value=default_setup_label)
+        setup_menu = tk.OptionMenu(setup_inner, setup_var, *setup_labels)
+        setup_menu.config(
             bg=_BG_SECONDARY, fg=_FG, font=("sans-serif", 10),
             highlightthickness=0, relief="flat", activebackground=_BTN_HOVER,
             activeforeground=_FG,
         )
-        theme_menu["menu"].config(
+        setup_menu["menu"].config(
             bg=_BG_SECONDARY, fg=_FG, activebackground=_ACCENT,
             activeforeground="#ffffff",
         )
-        theme_menu.pack(fill="x", padx=12, pady=(0, 8))
+        setup_menu.pack(fill="x", padx=12, pady=(0, 8))
 
-        # Perspective selector.
-        tk.Label(
-            container, text="Board perspective", bg=_BG, fg=_FG_DIM,
-            font=("sans-serif", 10), anchor="w",
-        ).pack(fill="x", pady=(0, 8))
+        if assistant_error is not None:
+            tk.Label(
+                setup_inner,
+                text=assistant_error,
+                bg=_BG_SECONDARY,
+                fg=_ERROR,
+                font=("sans-serif", 9),
+                justify="left",
+                wraplength=480,
+            ).pack(fill="x", padx=12, pady=(0, 8))
 
-        default_white_perspective = True
-        if self._last_observer_config is not None:
-            default_white_perspective = self._last_observer_config.white_perspective
-        perspective_var = tk.BooleanVar(value=default_white_perspective)
+        # Setup details.
+        details_card = tk.Frame(container, bg=_CARD_BORDER)
+        details_card.pack(fill="x", pady=(0, 12))
+        details_inner = tk.Frame(details_card, bg=_BG_SECONDARY)
+        details_inner.pack(fill="both", expand=True, padx=1, pady=1)
 
-        persp_frame = tk.Frame(container, bg=_BG)
-        persp_frame.pack(fill="x", pady=(0, 12))
-
-        white_btn = _styled_button(
-            persp_frame,
-            text="\u2654  White",
-            command=lambda: perspective_var.set(True),
-            bg=_BTN_WHITE_BG,
-            fg=_BTN_WHITE_FG,
-            hover_bg=_BTN_WHITE_HOVER,
-            active_bg="#f5ede1",
-            font=("sans-serif", 11, "bold"),
-            pady=8,
+        support_badge = tk.Label(
+            details_inner,
+            text="SETUP",
+            bg=_BTN_BG,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            padx=8,
+            pady=3,
         )
-        white_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        support_badge.pack(anchor="w", padx=12, pady=(10, 6))
 
-        black_btn = _styled_button(
-            persp_frame,
-            text="\u265a  Black",
-            command=lambda: perspective_var.set(False),
-            bg=_BTN_BLACK_BG,
-            fg=_BTN_BLACK_FG,
-            hover_bg=_BTN_BLACK_HOVER,
-            active_bg="#4a4a5c",
+        summary_label = tk.Label(
+            details_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG,
             font=("sans-serif", 11, "bold"),
-            pady=8,
+            justify="left",
+            wraplength=480,
+            anchor="w",
         )
-        black_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        summary_label.pack(fill="x", padx=12)
+
+        support_copy_label = tk.Label(
+            details_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        )
+        support_copy_label.pack(fill="x", padx=12, pady=(4, 0))
+
+        expected_label = tk.Label(
+            details_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        )
+        expected_label.pack(fill="x", padx=12, pady=(8, 0))
+
+        notes_label = tk.Label(
+            details_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        )
+        notes_label.pack(fill="x", padx=12, pady=(6, 10))
+
+        # Preflight results.
+        preflight_card = tk.Frame(container, bg=_CARD_BORDER)
+        preflight_card.pack(fill="x", pady=(0, 12))
+        preflight_inner = tk.Frame(preflight_card, bg=_BG_SECONDARY)
+        preflight_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        verdict_badge = tk.Label(
+            preflight_inner,
+            text="PREFLIGHT",
+            bg=_BTN_BG,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            padx=8,
+            pady=3,
+        )
+        verdict_badge.pack(anchor="w", padx=12, pady=(10, 6))
+
+        verdict_title = tk.Label(
+            preflight_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("sans-serif", 11, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=480,
+        )
+        verdict_title.pack(fill="x", padx=12)
+
+        verdict_body = tk.Label(
+            preflight_inner,
+            text="",
+            bg=_BG_SECONDARY,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        )
+        verdict_body.pack(fill="x", padx=12, pady=(6, 10))
+
+        latest_report: list[CalibrationReport | None] = [None]
+        validated_signature: list[tuple[int, str] | None] = [None]
+
+        def selected_monitor_index() -> int | None:
+            if not monitors:
+                return None
+            try:
+                selected = monitor_var.get()
+                return monitors[monitor_labels.index(selected)].index
+            except (ValueError, IndexError):
+                return None
+
+        def selected_profile() -> SetupSupportProfile | None:
+            if assistant is None:
+                return None
+            option = option_by_label.get(setup_var.get())
+            if option is None:
+                return None
+            return assistant.get_profile(option.profile_id)
+
+        def set_verdict(
+            badge_text: str,
+            title: str,
+            body: str,
+            *,
+            badge_bg: str,
+            badge_fg: str = "#ffffff",
+            title_fg: str = _FG,
+            body_fg: str = _FG_DIM,
+        ) -> None:
+            verdict_badge.config(text=badge_text, bg=badge_bg, fg=badge_fg)
+            verdict_title.config(text=title, fg=title_fg)
+            verdict_body.config(text=body, fg=body_fg)
+
+        def refresh_details() -> None:
+            profile = selected_profile()
+            if profile is None:
+                support_badge.config(text="SETUP", bg=_BTN_BG, fg=_FG)
+                summary_label.config(text="No declared setup available.")
+                support_copy_label.config(
+                    text="Observe Live now starts from declared setup profiles."
+                )
+                expected_label.config(text="")
+                notes_label.config(text=assistant_error or "")
+                return
+
+            badge_bg, badge_fg = self._support_badge_palette(
+                profile.support_level.value
+            )
+            support_badge.config(
+                text=profile.support_level.value.upper(),
+                bg=badge_bg,
+                fg=badge_fg,
+            )
+            summary_label.config(text=self._format_live_setup_summary(profile))
+            support_copy_label.config(
+                text=self._support_level_copy(profile.support_level.value)
+            )
+            expected_label.config(
+                text=(
+                    f"Expected theme: {profile.expected_theme_id}  |  "
+                    f"Template: {profile.template_theme}  |  "
+                    f"Perspective: {profile.perspective.title()}  |  "
+                    f"Template quality: {profile.template_quality}"
+                )
+            )
+            notes_label.config(text=profile.notes)
+
+        def refresh_preflight_state() -> None:
+            latest_report[0] = None
+            validated_signature[0] = None
+            can_run = selected_monitor_index() is not None and selected_profile() is not None
+            preflight_btn.config(state="normal" if can_run else "disabled")
+            start_btn.config(state="normal" if can_run else "disabled")
+
+            if assistant_error is not None:
+                set_verdict(
+                    "BLOCKED",
+                    "Setup catalog unavailable",
+                    assistant_error,
+                    badge_bg=_ERROR,
+                )
+                return
+
+            if selected_profile() is None:
+                set_verdict(
+                    "BLOCKED",
+                    "No declared live setup available",
+                    "Add a supported setup profile before starting Observe Live.",
+                    badge_bg=_ERROR,
+                )
+                return
+
+            if monitor_error is not None or selected_monitor_index() is None:
+                set_verdict(
+                    "BLOCKED",
+                    "Monitor selection required",
+                    monitor_error or "Pick a valid monitor before running preflight.",
+                    badge_bg=_ERROR,
+                )
+                return
+
+            set_verdict(
+                "READY",
+                "Preflight required before launch",
+                (
+                    "ChessLab will capture a short burst of live frames and return "
+                    "a PASS/FAIL verdict with blockers and corrective actions."
+                ),
+                badge_bg=_ACCENT_DARK,
+            )
+
+        def render_report(profile: SetupSupportProfile, report: CalibrationReport) -> None:
+            if report.passed:
+                set_verdict(
+                    "PASS",
+                    "Setup verified for live observation",
+                    self._format_preflight_report(profile, report),
+                    badge_bg=_SUCCESS,
+                )
+            else:
+                set_verdict(
+                    "FAIL",
+                    "Fix blockers before starting live observation",
+                    self._format_preflight_report(profile, report),
+                    badge_bg=_ERROR,
+                )
+
+        def run_preflight() -> CalibrationReport | None:
+            profile = selected_profile()
+            monitor_index = selected_monitor_index()
+            if assistant is None or profile is None or monitor_index is None:
+                refresh_preflight_state()
+                return None
+
+            preflight_btn.config(state="disabled")
+            start_btn.config(state="disabled")
+            cancel_btn.config(state="disabled")
+            set_verdict(
+                "RUNNING",
+                "Running live preflight",
+                (
+                    f"Capturing a few frames from monitor {monitor_index} and checking "
+                    f"setup '{profile.id}' against the declared support thresholds."
+                ),
+                badge_bg=_ACCENT,
+            )
+            dialog.update_idletasks()
+
+            try:
+                report = assistant.run_preflight(monitor_index, profile.id)
+            except Exception as exc:
+                latest_report[0] = None
+                validated_signature[0] = None
+                set_verdict(
+                    "ERROR",
+                    "Preflight could not complete",
+                    self._format_preflight_error(exc),
+                    badge_bg=_ERROR,
+                )
+                return None
+            finally:
+                cancel_btn.config(state="normal")
+                can_run = selected_monitor_index() is not None and selected_profile() is not None
+                preflight_btn.config(state="normal" if can_run else "disabled")
+                start_btn.config(state="normal" if can_run else "disabled")
+
+            latest_report[0] = report
+            if report.passed:
+                validated_signature[0] = (monitor_index, profile.id)
+            else:
+                validated_signature[0] = None
+            render_report(profile, report)
+            return report
 
         # OK / Cancel buttons.
         ok_frame = tk.Frame(container, bg=_BG)
         ok_frame.pack(fill="x", pady=(4, 0))
 
-        def on_ok() -> None:
-            if not monitors:
+        def on_start() -> None:
+            profile = selected_profile()
+            monitor_index = selected_monitor_index()
+            if assistant is None or profile is None or monitor_index is None:
+                refresh_preflight_state()
                 return
-            selected = monitor_var.get()
-            monitor_index = monitors[monitor_labels.index(selected)].index
-            result[0] = LiveObserverConfig(
-                monitor_index=monitor_index,
-                theme=theme_var.get(),
-                white_perspective=perspective_var.get(),
-                enable_game_tracking=True,
-            )
+
+            signature = (monitor_index, profile.id)
+            report = latest_report[0]
+            if validated_signature[0] != signature or report is None or not report.passed:
+                report = run_preflight()
+            if report is None or not report.passed:
+                return
+
+            result[0] = assistant.build_observer_config(monitor_index, profile)
             dialog.destroy()
 
-        ok_btn = _styled_button(
+        preflight_btn = _styled_button(
             ok_frame,
-            text="Start",
-            command=on_ok,
+            text="Run Preflight",
+            command=run_preflight,
+            font=("sans-serif", 11),
+            pady=8,
+        )
+        preflight_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        start_btn = _styled_button(
+            ok_frame,
+            text="Preflight & Start",
+            command=on_start,
             bg=_BTN_ACCENT_BG,
             fg=_BTN_ACCENT_FG,
             hover_bg=_BTN_ACCENT_HOVER,
@@ -1073,9 +1354,7 @@ class ChessGui:
             font=("sans-serif", 11, "bold"),
             pady=8,
         )
-        ok_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        if not monitors:
-            ok_btn.config(state="disabled")
+        start_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
         cancel_btn = _styled_button(
             ok_frame,
@@ -1086,6 +1365,17 @@ class ChessGui:
         )
         cancel_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
+        refresh_details()
+        refresh_preflight_state()
+        monitor_var.trace_add(
+            "write",
+            lambda *_args: (refresh_details(), refresh_preflight_state()),
+        )
+        setup_var.trace_add(
+            "write",
+            lambda *_args: (refresh_details(), refresh_preflight_state()),
+        )
+
         # Center dialog.
         dialog.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
@@ -1094,6 +1384,102 @@ class ChessGui:
 
         parent.wait_window(dialog)
         return result[0]
+
+    def _get_live_setup_assistant(self) -> LiveSetupAssistant:
+        """Lazily load the Observe Live setup assistant."""
+        if self._live_setup_assistant is None:
+            self._live_setup_assistant = LiveSetupAssistant()
+        return self._live_setup_assistant
+
+    @staticmethod
+    def _support_badge_palette(level: str) -> tuple[str, str]:
+        """Return badge colours for the given support level."""
+        normalized = level.strip().lower()
+        if normalized == "official":
+            return "#1e6f43", "#ffffff"
+        if normalized == "candidate":
+            return "#7a5a00", "#ffffff"
+        if normalized == "experimental":
+            return "#6d2f8b", "#ffffff"
+        return _BTN_BG, _FG
+
+    @staticmethod
+    def _support_level_copy(level: str) -> str:
+        """Human-facing description of the setup maturity level."""
+        normalized = level.strip().lower()
+        if normalized == "official":
+            return "Official reference setup. Recommended for normal live use."
+        if normalized == "candidate":
+            return "Candidate setup. Validate with preflight before every session."
+        if normalized == "experimental":
+            return "Experimental setup. Use for testing only and expect calibration failures."
+        return "Support level unknown. Treat this setup as unverified."
+
+    @staticmethod
+    def _format_live_setup_summary(profile: SetupSupportProfile) -> str:
+        """Summarize the declared setup in one readable line."""
+        return (
+            f"{profile.platform} / {profile.site_theme} / "
+            f"{profile.perspective.title()} perspective"
+        )
+
+    @staticmethod
+    def _format_preflight_report(
+        profile: SetupSupportProfile,
+        report: CalibrationReport,
+    ) -> str:
+        """Render a readable PASS/FAIL report for the Observe Live dialog."""
+        metrics = report.metrics
+        lines = [
+            (
+                "Metrics: "
+                f"detection {metrics.detection_rate:.0%}  |  "
+                f"theme {metrics.theme_match_rate:.0%}  |  "
+                f"ready {metrics.ready_rate:.0%}  |  "
+                f"uncertain {metrics.uncertain_rate:.0%}  |  "
+                f"p95 {metrics.p95_total_latency_ms:.0f} ms"
+            )
+        ]
+
+        if report.blockers:
+            lines.append("Blockers:")
+            lines.extend(f"- {line}" for line in report.blockers)
+        elif report.passed:
+            lines.append("No blockers detected for this declared setup.")
+
+        if report.corrective_actions:
+            lines.append("Corrective actions:")
+            lines.extend(f"- {line}" for line in report.corrective_actions)
+
+        if report.warnings:
+            lines.append("Warnings:")
+            lines.extend(f"- {line}" for line in report.warnings)
+
+        if not report.corrective_actions and profile.support_level.value == "official":
+            lines.append("This official setup is ready to launch without reconfiguration.")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_preflight_error(exc: Exception) -> str:
+        """Map preflight failures to actionable UI text."""
+        if isinstance(exc, CapturePermissionError):
+            return (
+                "Preflight blocked: screen-capture permission denied. Allow screen "
+                "recording in OS settings, then retry."
+            )
+        if isinstance(exc, DisplayUnavailableError):
+            return (
+                "Preflight unavailable: no display detected. Start a graphical "
+                "desktop session and retry."
+            )
+        if isinstance(exc, MonitorSelectionError):
+            return (
+                f"Preflight unavailable: {exc} Select a valid monitor and retry."
+            )
+        if isinstance(exc, ScreenCaptureError):
+            return f"Preflight failed: {exc}"
+        return f"Preflight failed: {exc}"
 
     def _on_toggle_observe(self) -> None:
         """Toggle live observation mode on/off."""
@@ -1109,7 +1495,13 @@ class ChessGui:
 
     def _start_observation(self, config: LiveObserverConfig) -> bool:
         """Start live observation with explicit lifecycle status handling."""
-        self._set_status("Starting live observation...", waiting=True)
+        if config.setup_id:
+            self._set_status(
+                f"Starting live observation for {config.setup_id}...",
+                waiting=True,
+            )
+        else:
+            self._set_status("Starting live observation...", waiting=True)
 
         # Clear the observation queue before starting.
         while not self._observation_queue.empty():
@@ -1135,7 +1527,17 @@ class ChessGui:
         if self._move_entry is not None:
             self._move_entry.config(state="disabled")
 
-        self._set_status("Live observation active — tracking moves")
+        if config.setup_id:
+            support = (
+                f" ({config.support_level})"
+                if config.support_level is not None
+                else ""
+            )
+            self._set_status(
+                f"Preflight PASS — live observation active for {config.setup_id}{support}"
+            )
+        else:
+            self._set_status("Live observation active — tracking moves")
         logger.info("Live observation started.")
         return True
 

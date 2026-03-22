@@ -5,6 +5,7 @@ from chesslab.validation.calibration import (
     CalibrationReport,
     resolve_image_paths,
     run_preflight_calibration,
+    run_preflight_calibration_on_frames,
 )
 from chesslab.validation.catalog import (
     DatasetThresholds,
@@ -39,5 +40,6 @@ __all__ = [
     "load_support_catalog",
     "resolve_image_paths",
     "run_preflight_calibration",
+    "run_preflight_calibration_on_frames",
     "validate_real_dataset",
 ]

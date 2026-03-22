@@ -225,6 +225,7 @@ def _print_preflight(report: CalibrationReport, profile: SetupSupportProfile) ->
 
     blockers = data["blockers"]
     warnings = data["warnings"]
+    corrective_actions = data["corrective_actions"]
     if blockers:
         print("Blockers:")
         for line in blockers:
@@ -232,6 +233,10 @@ def _print_preflight(report: CalibrationReport, profile: SetupSupportProfile) ->
     if warnings:
         print("Warnings:")
         for line in warnings:
+            print(f"- {line}")
+    if corrective_actions:
+        print("Corrective actions:")
+        for line in corrective_actions:
             print(f"- {line}")
 
 

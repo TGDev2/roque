@@ -1,4 +1,4 @@
-"""Pre-session calibration checks on real screenshots."""
+"""Pre-session calibration checks on captured or saved frames."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from chesslab.live import LiveFrameStatus, LivePositionProcessor, LiveProcessorC
 from chesslab.recognition.theme_detector import ThemeDetector
 from chesslab.splitting.board_splitter import BoardSplitter
 from chesslab.validation.catalog import SetupSupportProfile, SupportLevel
+
+_LATENCY_JITTER_MS = 5.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class CalibrationReport:
     passed: bool
     blockers: tuple[str, ...]
     warnings: tuple[str, ...]
+    corrective_actions: tuple[str, ...]
     metrics: CalibrationMetrics
 
     def to_dict(self) -> dict[str, object]:
@@ -72,6 +75,7 @@ class CalibrationReport:
             "passed": self.passed,
             "blockers": list(self.blockers),
             "warnings": list(self.warnings),
+            "corrective_actions": list(self.corrective_actions),
             "metrics": self.metrics.to_dict(),
         }
 
@@ -85,6 +89,23 @@ def run_preflight_calibration(
     """Run compatibility checks for one setup on captured screenshots."""
     if not image_paths:
         raise ValueError("Calibration requires at least one image.")
+    frames = tuple(_read_image(path) for path in image_paths)
+    return run_preflight_calibration_on_frames(
+        frames,
+        profile,
+        confidence_threshold=confidence_threshold,
+    )
+
+
+def run_preflight_calibration_on_frames(
+    frames: Sequence[NDArray],
+    profile: SetupSupportProfile,
+    *,
+    confidence_threshold: float = 0.60,
+) -> CalibrationReport:
+    """Run compatibility checks for one setup on in-memory frames."""
+    if not frames:
+        raise ValueError("Calibration requires at least one frame.")
 
     detector = BoardDetector()
     splitter = BoardSplitter()
@@ -97,7 +118,7 @@ def run_preflight_calibration(
         )
     )
 
-    warmup_frame = _read_image(image_paths[0])
+    warmup_frame = frames[0]
     processor.process_frame(warmup_frame)
 
     expected_theme = profile.expected_theme_id
@@ -114,9 +135,7 @@ def run_preflight_calibration(
     split_latencies: list[float] = []
     recognition_latencies: list[float] = []
 
-    for image_path in image_paths:
-        frame = _read_image(image_path)
-
+    for frame in frames:
         live_result = processor.process_frame(frame)
         status = live_result.status.value
         status_counts[status] = status_counts.get(status, 0) + 1
@@ -153,7 +172,7 @@ def run_preflight_calibration(
         ):
             theme_matches += 1
 
-    total = len(image_paths)
+    total = len(frames)
     detection_rate = detections / total
     theme_match_rate = theme_matches / detections if detections else 0.0
     ready_rate = ready / total
@@ -179,27 +198,30 @@ def run_preflight_calibration(
 
     if detection_rate < thresholds.min_detection_rate:
         blockers.append(
-            "Detection rate too low "
+            "Chessboard detection is too unstable "
             f"({detection_rate:.1%} < {thresholds.min_detection_rate:.1%})."
         )
     if theme_match_rate < thresholds.min_theme_match_rate:
         blockers.append(
-            "Theme match rate too low "
+            "The detected board theme does not match the selected setup reliably "
             f"({theme_match_rate:.1%} < {thresholds.min_theme_match_rate:.1%})."
         )
     if ready_rate < thresholds.min_ready_rate:
         blockers.append(
-            "Ready frame rate too low "
+            "Too few frames produced a stable chess position "
             f"({ready_rate:.1%} < {thresholds.min_ready_rate:.1%})."
         )
     if uncertain_rate > thresholds.max_uncertain_rate:
         blockers.append(
-            "Uncertain frame rate too high "
+            "Too many frames were uncertain "
             f"({uncertain_rate:.1%} > {thresholds.max_uncertain_rate:.1%})."
         )
-    if metrics.p95_total_latency_ms > thresholds.max_p95_total_latency_ms:
+    if _latency_exceeds(
+        metrics.p95_total_latency_ms,
+        thresholds.max_p95_total_latency_ms,
+    ):
         blockers.append(
-            "Total latency too high "
+            "Frame processing is too slow for reliable live observation "
             f"(p95 {metrics.p95_total_latency_ms:.1f} ms > "
             f"{thresholds.max_p95_total_latency_ms:.1f} ms)."
         )
@@ -215,6 +237,8 @@ def run_preflight_calibration(
             "Synthetic templates are not production-grade."
         )
 
+    corrective_actions = _build_corrective_actions(profile, metrics)
+
     return CalibrationReport(
         setup_id=profile.id,
         support_level=profile.support_level.value,
@@ -223,6 +247,7 @@ def run_preflight_calibration(
         passed=len(blockers) == 0,
         blockers=tuple(blockers),
         warnings=tuple(warnings),
+        corrective_actions=corrective_actions,
         metrics=metrics,
     )
 
@@ -264,3 +289,70 @@ def _p95(values: Sequence[float]) -> float:
     ordered = sorted(float(v) for v in values)
     index = max(0, math.ceil(0.95 * len(ordered)) - 1)
     return ordered[index]
+
+
+def _latency_exceeds(value_ms: float, threshold_ms: float) -> bool:
+    return value_ms > threshold_ms + _LATENCY_JITTER_MS
+
+
+def _build_corrective_actions(
+    profile: SetupSupportProfile,
+    metrics: CalibrationMetrics,
+) -> tuple[str, ...]:
+    actions: list[str] = []
+    status_counts = metrics.status_counts
+
+    if (
+        metrics.detection_rate < profile.preflight_thresholds.min_detection_rate
+        or status_counts.get(LiveFrameStatus.BOARD_NOT_FOUND.value, 0) > 0
+    ):
+        actions.append(
+            "Keep the full chessboard visible on the selected monitor and confirm "
+            "you chose the monitor that actually contains the board."
+        )
+
+    if (
+        metrics.theme_match_rate < profile.preflight_thresholds.min_theme_match_rate
+        or status_counts.get(LiveFrameStatus.THEME_UNRECOGNIZED.value, 0) > 0
+        or status_counts.get(LiveFrameStatus.THEME_UNSUPPORTED.value, 0) > 0
+    ):
+        actions.append(
+            f"Switch the site board theme to '{profile.expected_theme_id}' and avoid "
+            "custom board colors before retrying."
+        )
+
+    if (
+        metrics.ready_rate < profile.preflight_thresholds.min_ready_rate
+        or metrics.uncertain_rate > profile.preflight_thresholds.max_uncertain_rate
+        or status_counts.get(LiveFrameStatus.POSITION_UNCERTAIN.value, 0) > 0
+    ):
+        actions.append(
+            "Increase the on-screen board size, reduce blur or animations, and make "
+            "sure the board stays sharp during capture."
+        )
+
+    if (
+        metrics.invalid_rate > 0.0
+        or status_counts.get(LiveFrameStatus.INVALID_POSITION.value, 0) > 0
+    ):
+        actions.append(
+            "Wait for pieces to stop moving and remove overlays or popups that cover "
+            "board squares before rerunning preflight."
+        )
+
+    if _latency_exceeds(
+        metrics.p95_total_latency_ms,
+        profile.preflight_thresholds.max_p95_total_latency_ms,
+    ):
+        actions.append(
+            "Reduce capture load on this monitor by closing heavy apps or extra "
+            "windows, then rerun the preflight."
+        )
+
+    if profile.support_level is not SupportLevel.OFFICIAL:
+        actions.append(
+            "Prefer an official setup for routine live observation; candidate and "
+            "experimental setups may still require manual adjustment."
+        )
+
+    return tuple(dict.fromkeys(actions))
