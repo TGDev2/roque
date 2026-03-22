@@ -6,6 +6,11 @@ only built-in PowerShell/.NET APIs on the Windows host.
 For the full support process (support matrix + calibration + promotion rules),
 see `docs/support-matrix-and-calibration.md`.
 
+For the product-level usage boundary, see
+`docs/product-usage-and-guardrails.md`. This workflow only covers the technical
+path for passive observation; users still need a context that explicitly allows
+outside tools.
+
 Before running a live session, run a preflight calibration on representative
 captures to confirm your setup is compatible:
 
@@ -18,6 +23,9 @@ PYTHONPATH=src ./.venv/bin/python -m chesslab.validation preflight \
 
 `supported_setups.json` defines the support perimeter (`official`, `candidate`,
 `experimental`) by platform/theme/perspective.
+
+A preflight PASS confirms the setup works technically. It does not grant
+permission from chess.com, lichess, or any other third-party platform.
 
 ## 1. Start the receiver in the Ubuntu VM
 

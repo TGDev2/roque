@@ -75,6 +75,15 @@ from chesslab.review.game_reviewer import (
     ReviewCancelledError,
     ReviewConfig,
 )
+from chesslab.product_usage import (
+    OBSERVE_LIVE_ACKNOWLEDGEMENT,
+    OBSERVE_LIVE_DIALOG_INTRO,
+    OBSERVE_LIVE_GUARDRAIL_BODY,
+    OBSERVE_LIVE_GUARDRAIL_TITLE,
+    PRODUCT_BOUNDARY,
+    PRODUCT_SCOPE,
+    journey_usage,
+)
 from chesslab.validation import CalibrationReport, SetupSupportProfile, SupportCatalogError
 
 logger = logging.getLogger(__name__)
@@ -368,8 +377,8 @@ class ChessGui:
         tk.Label(
             container,
             text=(
-                "Start from one place and switch modes in the same app: "
-                "live observe, manual coaching, save/export, and review."
+                "Start from one place and switch modes in the same app without "
+                "changing the product boundary."
             ),
             bg=_BG,
             fg=_FG_DIM,
@@ -378,29 +387,68 @@ class ChessGui:
             wraplength=430,
         ).pack(anchor="w", pady=(4, 12))
 
+        scope_card = tk.Frame(container, bg=_CARD_BORDER)
+        scope_card.pack(fill="x", pady=(0, 12))
+        scope_inner = tk.Frame(scope_card, bg=_BG_SECONDARY)
+        scope_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            scope_inner,
+            text="Product Scope",
+            bg=_BG_SECONDARY,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(8, 4))
+
+        tk.Label(
+            scope_inner,
+            text=PRODUCT_SCOPE,
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            justify="left",
+            wraplength=410,
+            anchor="w",
+        ).pack(fill="x", padx=10)
+
+        tk.Label(
+            scope_inner,
+            text=PRODUCT_BOUNDARY,
+            bg=_BG_SECONDARY,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=410,
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(4, 8))
+
         def choose(mode: StartupJourneyMode) -> None:
             result[0] = mode
             dialog.destroy()
 
+        manual_journey = journey_usage("manual_coach")
+        observe_journey = journey_usage("observe_live")
+        review_journey = journey_usage("review")
         actions = [
             (
-                "Manual Coach",
-                "Play with guided suggestions and full move history.",
+                manual_journey.label,
+                manual_journey.launcher_summary,
                 StartupJourneyMode.MANUAL_COACH,
             ),
             (
-                "Observe Live",
-                "Track a live board from screen capture and sync moves automatically.",
+                observe_journey.label,
+                observe_journey.launcher_summary,
                 StartupJourneyMode.OBSERVE_LIVE,
             ),
             (
                 "Review Recent",
-                "Open a saved game and launch full post-game review.",
+                review_journey.launcher_summary,
                 StartupJourneyMode.REVIEW_RECENT,
             ),
             (
                 "Paste PGN",
-                "Paste a PGN directly and jump into review mode.",
+                review_journey.launcher_summary,
                 StartupJourneyMode.REVIEW_PASTE,
             ),
         ]
@@ -478,12 +526,12 @@ class ChessGui:
             return
 
         if mode is StartupJourneyMode.REVIEW_RECENT:
-            self._set_status("Select a saved game to load or review.")
+            self._set_status("Review — select a saved game for post-game analysis.")
             self._on_recent_games()
             return
 
         if mode is StartupJourneyMode.REVIEW_PASTE:
-            self._set_status("Paste a PGN to launch review.")
+            self._set_status("Review — paste a PGN to launch post-game analysis.")
             self._on_paste_pgn()
             return
 
@@ -491,7 +539,10 @@ class ChessGui:
             if self._config.startup_review_file is None:
                 self._set_status("No review file was provided.", error=True)
                 return
-            self._set_status(f"Loading review: {self._config.startup_review_file.name}")
+            self._set_status(
+                f"Review — loading post-game analysis from "
+                f"{self._config.startup_review_file.name}"
+            )
             self._review_from_file(self._config.startup_review_file)
 
     # -- Color selection dialog ----------------------------------------------
@@ -716,7 +767,7 @@ class ChessGui:
 
         self._observe_btn = _styled_button(
             self._btn_frame,
-            text="\u25ce  Observe",
+            text="\u25ce  Observe Live",
             command=self._on_toggle_observe,
         )
         self._observe_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
@@ -894,7 +945,7 @@ class ChessGui:
             assistant_error = f"Setup catalog unavailable: {exc}"
 
         dialog = tk.Toplevel(parent)
-        dialog.title("Live Observation")
+        dialog.title("Observe Live")
         dialog.configure(bg=_BG)
         dialog.transient(parent)
         dialog.grab_set()
@@ -904,22 +955,72 @@ class ChessGui:
         container.pack(fill="both", expand=True, padx=24, pady=20)
 
         tk.Label(
-            container, text="Live Observation", bg=_BG, fg=_FG,
+            container, text="Observe Live", bg=_BG, fg=_FG,
             font=("sans-serif", 18, "bold"),
         ).pack(pady=(0, 6))
 
         tk.Label(
             container,
-            text=(
-                "Choose a declared setup, run a live preflight, and start "
-                "observation only after ChessLab returns a PASS verdict."
-            ),
+            text=OBSERVE_LIVE_DIALOG_INTRO,
             bg=_BG,
             fg=_FG_DIM,
             font=("sans-serif", 9),
             justify="left",
             wraplength=500,
         ).pack(fill="x", pady=(0, 14))
+
+        guardrail_card = tk.Frame(container, bg=_CARD_BORDER)
+        guardrail_card.pack(fill="x", pady=(0, 12))
+        guardrail_inner = tk.Frame(guardrail_card, bg=_BG_SECONDARY)
+        guardrail_inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        tk.Label(
+            guardrail_inner,
+            text="Usage Guardrail",
+            bg=_BG_SECONDARY,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(10, 4))
+
+        tk.Label(
+            guardrail_inner,
+            text=OBSERVE_LIVE_GUARDRAIL_TITLE,
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("sans-serif", 11, "bold"),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        ).pack(fill="x", padx=12)
+
+        tk.Label(
+            guardrail_inner,
+            text=OBSERVE_LIVE_GUARDRAIL_BODY,
+            bg=_BG_SECONDARY,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=480,
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(6, 8))
+
+        acknowledgement_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            guardrail_inner,
+            text=OBSERVE_LIVE_ACKNOWLEDGEMENT,
+            variable=acknowledgement_var,
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            selectcolor=_BG_SECONDARY,
+            activebackground=_BG_SECONDARY,
+            activeforeground=_FG,
+            highlightthickness=0,
+            justify="left",
+            anchor="w",
+            wraplength=470,
+            font=("sans-serif", 9, "bold"),
+        ).pack(fill="x", padx=12, pady=(0, 10))
 
         # Monitor selector.
         monitor_card = tk.Frame(container, bg=_CARD_BORDER)
@@ -1209,9 +1310,12 @@ class ChessGui:
         def refresh_preflight_state() -> None:
             latest_report[0] = None
             validated_signature[0] = None
-            can_run = selected_monitor_index() is not None and selected_profile() is not None
-            preflight_btn.config(state="normal" if can_run else "disabled")
-            start_btn.config(state="normal" if can_run else "disabled")
+            can_preflight = (
+                selected_monitor_index() is not None and selected_profile() is not None
+            )
+            can_start = can_preflight and acknowledgement_var.get()
+            preflight_btn.config(state="normal" if can_preflight else "disabled")
+            start_btn.config(state="normal" if can_start else "disabled")
 
             if assistant_error is not None:
                 set_verdict(
@@ -1237,6 +1341,19 @@ class ChessGui:
                     "Monitor selection required",
                     monitor_error or "Pick a valid monitor before running preflight.",
                     badge_bg=_ERROR,
+                )
+                return
+
+            if not acknowledgement_var.get():
+                set_verdict(
+                    "ACK",
+                    "Confirm the Observe Live guardrail",
+                    (
+                        "ChessLab only starts Observe Live after you confirm "
+                        "the session is passive observation in a context that "
+                        "allows outside tools."
+                    ),
+                    badge_bg="#7a5a00",
                 )
                 return
 
@@ -1301,9 +1418,13 @@ class ChessGui:
                 return None
             finally:
                 cancel_btn.config(state="normal")
-                can_run = selected_monitor_index() is not None and selected_profile() is not None
-                preflight_btn.config(state="normal" if can_run else "disabled")
-                start_btn.config(state="normal" if can_run else "disabled")
+                can_preflight = (
+                    selected_monitor_index() is not None
+                    and selected_profile() is not None
+                )
+                can_start = can_preflight and acknowledgement_var.get()
+                preflight_btn.config(state="normal" if can_preflight else "disabled")
+                start_btn.config(state="normal" if can_start else "disabled")
 
             latest_report[0] = report
             if report.passed:
@@ -1320,6 +1441,9 @@ class ChessGui:
         def on_start() -> None:
             profile = selected_profile()
             monitor_index = selected_monitor_index()
+            if not acknowledgement_var.get():
+                refresh_preflight_state()
+                return
             if assistant is None or profile is None or monitor_index is None:
                 refresh_preflight_state()
                 return
@@ -1375,6 +1499,10 @@ class ChessGui:
             "write",
             lambda *_args: (refresh_details(), refresh_preflight_state()),
         )
+        acknowledgement_var.trace_add(
+            "write",
+            lambda *_args: refresh_preflight_state(),
+        )
 
         # Center dialog.
         dialog.update_idletasks()
@@ -1408,11 +1536,20 @@ class ChessGui:
         """Human-facing description of the setup maturity level."""
         normalized = level.strip().lower()
         if normalized == "official":
-            return "Official reference setup. Recommended for normal live use."
+            return (
+                "Official reference setup. Recommended for passive live "
+                "observation in permitted contexts."
+            )
         if normalized == "candidate":
-            return "Candidate setup. Validate with preflight before every session."
+            return (
+                "Candidate setup. Validate with preflight before every "
+                "permitted live session."
+            )
         if normalized == "experimental":
-            return "Experimental setup. Use for testing only and expect calibration failures."
+            return (
+                "Experimental setup. Use for testing only and expect "
+                "calibration failures."
+            )
         return "Support level unknown. Treat this setup as unverified."
 
     @staticmethod
@@ -1458,6 +1595,12 @@ class ChessGui:
         if not report.corrective_actions and profile.support_level.value == "official":
             lines.append("This official setup is ready to launch without reconfiguration.")
 
+        if report.passed:
+            lines.append(
+                "PASS confirms technical compatibility only. Confirm your "
+                "platform or event allows passive observation and outside tools."
+            )
+
         return "\n".join(lines)
 
     @staticmethod
@@ -1497,11 +1640,11 @@ class ChessGui:
         """Start live observation with explicit lifecycle status handling."""
         if config.setup_id:
             self._set_status(
-                f"Starting live observation for {config.setup_id}...",
+                f"Starting Observe Live for {config.setup_id}...",
                 waiting=True,
             )
         else:
-            self._set_status("Starting live observation...", waiting=True)
+            self._set_status("Starting Observe Live...", waiting=True)
 
         # Clear the observation queue before starting.
         while not self._observation_queue.empty():
@@ -1523,7 +1666,7 @@ class ChessGui:
         self._last_observer_config = config
 
         if self._observe_btn is not None:
-            self._observe_btn.config(text="\u25a0  Stop")
+            self._observe_btn.config(text="\u25a0  Stop Live")
         if self._move_entry is not None:
             self._move_entry.config(state="disabled")
 
@@ -1534,10 +1677,11 @@ class ChessGui:
                 else ""
             )
             self._set_status(
-                f"Preflight PASS — live observation active for {config.setup_id}{support}"
+                f"Preflight PASS — Observe Live active for {config.setup_id}"
+                f"{support}. Passive sync only."
             )
         else:
-            self._set_status("Live observation active — tracking moves")
+            self._set_status("Observe Live active — passive sync only.")
         logger.info("Live observation started.")
         return True
 
@@ -1549,7 +1693,7 @@ class ChessGui:
         self._observing = False
 
         if self._observe_btn is not None:
-            self._observe_btn.config(text="\u25ce  Observe")
+            self._observe_btn.config(text="\u25ce  Observe Live")
         if self._move_entry is not None:
             self._move_entry.config(state="normal")
 
@@ -1908,9 +2052,14 @@ class ChessGui:
             return
 
         if self._coach.is_player_turn:
-            self._set_status("Your turn \u2014 click the board or type a move")
+            self._set_status(
+                "Manual Coach \u2014 your turn: click the board or type a move"
+            )
         else:
-            self._set_status("Opponent's turn \u2014 enter their move", waiting=True)
+            self._set_status(
+                "Manual Coach \u2014 opponent's turn: enter their move",
+                waiting=True,
+            )
 
     def _set_status(
         self,
@@ -2556,7 +2705,7 @@ class ChessGui:
         self._review_navigate_to(0)
 
         self._set_status(
-            f"Review mode \u2014 {len(review.moves)} moves analysed "
+            f"Review mode \u2014 post-game analysis for {len(review.moves)} moves "
             f"in {review.total_elapsed_ms / 1000:.1f}s",
         )
         logger.info(

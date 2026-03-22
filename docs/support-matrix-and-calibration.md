@@ -3,6 +3,9 @@
 This document defines the reproducible workflow used to support new live setups
 (platform/theme/perspective).
 
+For the product-level usage boundary for Observe Live, see
+`docs/product-usage-and-guardrails.md`.
+
 ## 1. Support perimeter source of truth
 
 Support profiles are declared in:
@@ -40,6 +43,9 @@ The command reports:
 - ready / uncertain / invalid frame rates
 - p95 latency
 - PASS / FAIL with explicit blockers
+
+A PASS confirms technical compatibility for the declared setup. It does not
+mean a third-party platform or event allows outside tools in that context.
 
 ## 3. Real dataset contract (engineering-facing)
 

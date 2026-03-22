@@ -9,6 +9,7 @@ from typing import Sequence
 
 from chesslab.analysis import EngineNotFoundError
 from chesslab.gui import ChessGui, GuiConfig, StartupJourneyMode
+from chesslab.product_usage import PRODUCT_BOUNDARY, PRODUCT_SCOPE
 
 
 _MODE_MAP: dict[str, StartupJourneyMode] = {
@@ -23,8 +24,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chesslab",
         description=(
-            "Launch ChessLab from a single product entry point. "
-            "Modes share the same GUI journey (play, live observe, save, review)."
+            f"Launch ChessLab from a single product entry point. "
+            f"{PRODUCT_SCOPE} {PRODUCT_BOUNDARY}"
         ),
     )
     parser.add_argument(
@@ -36,7 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--review-file",
         default=None,
-        help="Optional PGN file to open directly in review mode.",
+        help="Optional PGN file to open directly in post-game review mode.",
     )
     parser.add_argument(
         "--log-level",

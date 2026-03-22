@@ -102,6 +102,18 @@ class TestObserveLiveHelpers:
         assert "Chessboard detection is too unstable" in text
         assert "Keep the full chessboard visible" in text
 
+    def test_format_preflight_report_marks_pass_as_technical_only(self) -> None:
+        gui = ChessGui()
+        profile = load_support_catalog().get_profile("chesscom_green_white")
+
+        assert profile is not None
+        report = _make_report(passed=True)
+
+        text = gui._format_preflight_report(profile, report)
+
+        assert "technical compatibility only" in text
+        assert "outside tools" in text
+
     def test_format_preflight_error_uses_actionable_capture_message(self) -> None:
         message = ChessGui._format_preflight_error(
             CapturePermissionError("permission denied")
@@ -132,3 +144,4 @@ class TestObserveLiveHelpers:
         assert gui._observing is True
         assert observer.start.called
         assert gui._set_status.call_args_list[-1].args[0].startswith("Preflight PASS")
+        assert "Passive sync only" in gui._set_status.call_args_list[-1].args[0]
