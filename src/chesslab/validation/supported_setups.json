@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "setups": [
+    {
+      "id": "chesscom_green_white",
+      "platform": "chess.com",
+      "site_theme": "green",
+      "perspective": "white",
+      "template_theme": "chess.com-green",
+      "support_level": "candidate",
+      "template_quality": "real",
+      "notes": "Primary setup for live mode. Requires a preflight calibration check before starting a session.",
+      "dataset_manifest": "tests/integration/fixtures/real_setups_manifest.json",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.90,
+        "min_theme_match_rate": 0.85,
+        "min_ready_rate": 0.60,
+        "max_uncertain_rate": 0.30,
+        "max_p95_total_latency_ms": 400.0
+      },
+      "dataset_thresholds": {
+        "min_detection_rate": 0.90,
+        "min_mean_iou": 0.90,
+        "min_theme_match_rate": 0.85,
+        "min_ready_rate": 0.60,
+        "max_uncertain_rate": 0.30,
+        "max_invalid_rate": 0.10,
+        "max_p95_total_latency_ms": 400.0,
+        "max_p95_detection_latency_ms": 300.0,
+        "max_p95_split_latency_ms": 50.0,
+        "max_p95_recognition_latency_ms": 150.0
+      }
+    },
+    {
+      "id": "chesscom_green_black",
+      "platform": "chess.com",
+      "site_theme": "green",
+      "perspective": "black",
+      "template_theme": "chess.com-green",
+      "support_level": "candidate",
+      "template_quality": "real",
+      "notes": "Same template family as white perspective, but no dedicated real dataset in repository yet.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.90,
+        "min_theme_match_rate": 0.85,
+        "min_ready_rate": 0.60,
+        "max_uncertain_rate": 0.30,
+        "max_p95_total_latency_ms": 400.0
+      }
+    },
+    {
+      "id": "chesscom_brown_white",
+      "platform": "chess.com",
+      "site_theme": "brown",
+      "perspective": "white",
+      "template_theme": "chess.com-brown",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "chesscom_blue_white",
+      "platform": "chess.com",
+      "site_theme": "blue",
+      "perspective": "white",
+      "template_theme": "chess.com-blue",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "chesscom_purple_white",
+      "platform": "chess.com",
+      "site_theme": "purple",
+      "perspective": "white",
+      "template_theme": "chess.com-purple",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "chesscom_walnut_white",
+      "platform": "chess.com",
+      "site_theme": "walnut",
+      "perspective": "white",
+      "template_theme": "chess.com-walnut",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "lichess_brown_white",
+      "platform": "lichess",
+      "site_theme": "brown",
+      "perspective": "white",
+      "template_theme": "lichess-brown",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "lichess_blue_white",
+      "platform": "lichess",
+      "site_theme": "blue",
+      "perspective": "white",
+      "template_theme": "lichess-blue",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    },
+    {
+      "id": "lichess_green_white",
+      "platform": "lichess",
+      "site_theme": "green",
+      "perspective": "white",
+      "template_theme": "lichess-green",
+      "support_level": "experimental",
+      "template_quality": "synthetic",
+      "notes": "Templates are synthetic placeholders. Use only for experiments and always calibrate first.",
+      "preflight_thresholds": {
+        "min_detection_rate": 0.85,
+        "min_theme_match_rate": 0.80,
+        "min_ready_rate": 0.40,
+        "max_uncertain_rate": 0.50,
+        "max_p95_total_latency_ms": 450.0
+      }
+    }
+  ]
+}

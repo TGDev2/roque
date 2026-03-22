@@ -3,8 +3,21 @@
 This workflow keeps the full Python/OpenCV stack inside the Ubuntu VM and uses
 only built-in PowerShell/.NET APIs on the Windows host.
 
-The intended use case is a real chess.com game with the board theme fixed to
-`green`, which is the default theme used by the remote runner.
+For the full support process (support matrix + calibration + promotion rules),
+see `docs/support-matrix-and-calibration.md`.
+
+Before running a live session, run a preflight calibration on representative
+captures to confirm your setup is compatible:
+
+```bash
+PYTHONPATH=src ./.venv/bin/python -m chesslab.validation list
+PYTHONPATH=src ./.venv/bin/python -m chesslab.validation preflight \
+  --setup-id chesscom_green_white \
+  tests/integration/fixtures/images/*.png
+```
+
+`supported_setups.json` defines the support perimeter (`official`, `candidate`,
+`experimental`) by platform/theme/perspective.
 
 ## 1. Start the receiver in the Ubuntu VM
 
@@ -20,13 +33,13 @@ Useful options:
 PYTHONPATH=src ./.venv/bin/python scripts/remote_live.py \
   --host 0.0.0.0 \
   --port 8765 \
-  --theme green \
+  --theme chess.com-green \
   --active-color w
 ```
 
 Notes:
 
-- `green` is already the default theme.
+- `chess.com-green` is the recommended template theme.
 - Use `--black-perspective` if the board is flipped.
 - Use `--allow-uncertain` only if you want a FEN even when recognition confidence is low.
 
@@ -112,6 +125,13 @@ detected.
 - Keep the board large and fully visible.
 - Avoid overlays or browser zoom changes while calibrating.
 - Start with `-SelectRegion` or a cropped region around the browser window if full-screen capture is noisy.
+- Promote a setup to `official` only after it passes real-dataset validation:
+
+```bash
+PYTHONPATH=src ./.venv/bin/python -m chesslab.validation validate-real \
+  --manifest tests/integration/fixtures/real_setups_manifest.json \
+  --setup-id chesscom_green_white
+```
 
 ## 6. Quick troubleshooting
 

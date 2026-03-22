@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 chesslab = "chesslab.app:main"
+chesslab-validate = "chesslab.validation.__main__:main"
 
 [project.optional-dependencies]
 dev = [
@@ -28,6 +29,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "chesslab.recognition" = ["templates/**/*.png", "templates/**/*.json", "themes.json"]
+"chesslab.validation" = ["supported_setups.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
