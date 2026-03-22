@@ -30,6 +30,7 @@ from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
     GameReviewer,
+    LessonTheme,
     MoveClassification,
     ReviewCancelledError,
     ReviewConfig,
@@ -435,6 +436,58 @@ class TestSummaryAggregation:
 
 
 # ---------------------------------------------------------------------------
+# Lesson extraction
+# ---------------------------------------------------------------------------
+
+
+class TestLessonExtraction:
+    """Lessons are concrete, prioritised, and skipped when signal is weak."""
+
+    def test_extracts_phase_pattern_lesson(self) -> None:
+        board = _make_board("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")
+        review = _review_with_mock(
+            board,
+            evals_cp=[20, -20, 70, -70, 160, -160, 210],
+        )
+
+        assert review.lessons
+        lesson = review.lessons[0]
+        assert lesson.priority == 1
+        assert lesson.theme is LessonTheme.PHASE_PATTERN
+        assert lesson.phase is GamePhase.OPENING
+        assert lesson.is_white is False
+        assert lesson.focus_ply == 3
+        assert lesson.related_plies == (1, 3, 5)
+        assert "Black had 3 moves rated inaccuracy or worse" in lesson.finding
+
+    def test_extracts_turning_point_and_advantage_management(self) -> None:
+        board = _make_board("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6")
+        review = _review_with_mock(
+            board,
+            evals_cp=[20, -20, 20, -20, 200, -20, 20],
+        )
+
+        themes = {lesson.theme for lesson in review.lessons}
+        assert LessonTheme.TURNING_POINT in themes
+        assert LessonTheme.ADVANTAGE_MANAGEMENT in themes
+        assert any(lesson.focus_ply == 4 for lesson in review.lessons)
+
+    def test_short_game_skips_lessons(self) -> None:
+        board = _make_board("e4")
+        review = _review_with_mock(board, evals_cp=[20, -18])
+        assert review.lessons == ()
+
+    def test_low_signal_game_skips_lessons(self) -> None:
+        board = _make_board("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")
+        review = _review_with_mock(
+            board,
+            evals_cp=[20, -18, 20, -18, 20, -18, 20],
+        )
+
+        assert review.lessons == ()
+
+
+# ---------------------------------------------------------------------------
 # Progress callback
 # ---------------------------------------------------------------------------
 
@@ -497,6 +550,7 @@ class TestEdgeCases:
         assert len(review.moves) == 0
         assert review.white_avg_cp_loss == 0.0
         assert review.black_avg_cp_loss == 0.0
+        assert review.lessons == ()
 
     def test_single_move_game(self) -> None:
         board = _make_board("e4")

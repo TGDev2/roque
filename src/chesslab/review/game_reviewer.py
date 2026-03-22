@@ -1,9 +1,10 @@
-"""Post-game review with move classification by centipawn loss.
+"""Post-game review with move classification and lesson extraction.
 
 Replays a completed game position by position, analyses each with Stockfish,
-and classifies every move as excellent / good / inaccuracy / mistake / blunder
-based on the evaluation drop.  A :class:`GameReview` summary aggregates
-statistics per phase and highlights critical moments.
+classifies every move as excellent / good / inaccuracy / mistake / blunder
+based on the evaluation drop, and extracts a few prioritised lessons from the
+most actionable patterns.  A :class:`GameReview` summary aggregates statistics
+per phase, highlights critical moments, and surfaces concrete takeaways.
 
 Usage::
 
@@ -72,6 +73,14 @@ class GamePhase(Enum):
     ENDGAME = "endgame"
 
 
+class LessonTheme(Enum):
+    """High-level type of lesson extracted from a review."""
+
+    PHASE_PATTERN = "phase_pattern"
+    TURNING_POINT = "turning_point"
+    ADVANTAGE_MANAGEMENT = "advantage_management"
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -87,6 +96,31 @@ _PIECE_VALUES: dict[chess.PieceType, int] = {
 
 # Large centipawn stand-in for mate scores.
 _MATE_CP = 100_000
+
+_LESSON_MIN_PLIES = 6
+_LESSON_MAX_COUNT = 3
+_LESSON_PHASE_MIN_NOTABLE_MOVES = 2
+_LESSON_PHASE_MIN_TOTAL_LOSS = 120
+_LESSON_TURNING_POINT_MIN_LOSS = 120
+_LESSON_ADVANTAGE_THRESHOLD = 120
+_LESSON_EQUALITY_BAND = 60
+_SIDE_NAMES: dict[bool, str] = {
+    True: "White",
+    False: "Black",
+}
+_NOTABLE_CLASSIFICATIONS = frozenset({
+    MoveClassification.INACCURACY,
+    MoveClassification.MISTAKE,
+    MoveClassification.BLUNDER,
+})
+_SEVERITY_SCORES: dict[MoveClassification, int] = {
+    MoveClassification.EXCELLENT: 0,
+    MoveClassification.GOOD: 0,
+    MoveClassification.INACCURACY: 20,
+    MoveClassification.MISTAKE: 80,
+    MoveClassification.BLUNDER: 140,
+    MoveClassification.FORCED: 0,
+}
 
 
 @dataclass
@@ -151,6 +185,21 @@ class PhaseSummary:
 
 
 @dataclass(frozen=True)
+class ReviewLesson:
+    """Prioritised lesson extracted from a completed review."""
+
+    priority: int
+    theme: LessonTheme
+    title: str
+    finding: str
+    takeaway: str
+    focus_ply: int
+    related_plies: tuple[int, ...] = field(default_factory=tuple)
+    phase: GamePhase | None = None
+    is_white: bool | None = None
+
+
+@dataclass(frozen=True)
 class GameReview:
     """Complete review of a game with per-move classifications and summary."""
 
@@ -161,6 +210,7 @@ class GameReview:
     white_avg_cp_loss: float
     black_avg_cp_loss: float
     critical_moments: tuple[int, ...]
+    lessons: tuple[ReviewLesson, ...]
     total_elapsed_ms: float
 
 
@@ -488,6 +538,7 @@ class GameReviewer:
         black_avg = self._avg_cp_loss(black_moves)
 
         phase_summaries = self._build_phase_summaries(reviewed)
+        lessons = self._build_lessons(reviewed)
 
         critical = tuple(
             m.ply for m in reviewed
@@ -502,6 +553,7 @@ class GameReviewer:
             white_avg_cp_loss=white_avg,
             black_avg_cp_loss=black_avg,
             critical_moments=critical,
+            lessons=lessons,
             total_elapsed_ms=elapsed_ms,
         )
 
@@ -543,6 +595,276 @@ class GameReviewer:
             ))
         return tuple(summaries)
 
+    def _build_lessons(
+        self,
+        reviewed: list[ReviewedMove],
+    ) -> tuple[ReviewLesson, ...]:
+        """Extract a few concrete lessons from repeated or decisive errors."""
+        if len(reviewed) < _LESSON_MIN_PLIES:
+            return ()
+
+        candidates: list[tuple[int, ReviewLesson]] = []
+        candidates.extend(self._build_phase_pattern_candidates(reviewed))
+
+        turning_point = self._build_turning_point_candidate(reviewed)
+        if turning_point is not None:
+            candidates.append(turning_point)
+
+        advantage_management = self._build_advantage_management_candidate(reviewed)
+        if advantage_management is not None:
+            candidates.append(advantage_management)
+
+        if not candidates:
+            return ()
+
+        selected: list[ReviewLesson] = []
+        used_focus_plies: set[int] = set()
+        for _, lesson in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if lesson.focus_ply in used_focus_plies:
+                continue
+            selected.append(ReviewLesson(
+                priority=len(selected) + 1,
+                theme=lesson.theme,
+                title=lesson.title,
+                finding=lesson.finding,
+                takeaway=lesson.takeaway,
+                focus_ply=lesson.focus_ply,
+                related_plies=lesson.related_plies,
+                phase=lesson.phase,
+                is_white=lesson.is_white,
+            ))
+            used_focus_plies.add(lesson.focus_ply)
+            if len(selected) >= _LESSON_MAX_COUNT:
+                break
+
+        return tuple(selected)
+
+    def _build_phase_pattern_candidates(
+        self,
+        reviewed: list[ReviewedMove],
+    ) -> list[tuple[int, ReviewLesson]]:
+        grouped: dict[tuple[bool, GamePhase], list[ReviewedMove]] = {}
+        for move in reviewed:
+            if move.classification not in _NOTABLE_CLASSIFICATIONS:
+                continue
+            grouped.setdefault((move.is_white, move.phase), []).append(move)
+
+        candidates: list[tuple[int, ReviewLesson]] = []
+        for (is_white, phase), moves in grouped.items():
+            if len(moves) < _LESSON_PHASE_MIN_NOTABLE_MOVES:
+                continue
+
+            total_loss = sum(move.cp_loss for move in moves)
+            if total_loss < _LESSON_PHASE_MIN_TOTAL_LOSS:
+                continue
+
+            focus = max(
+                moves,
+                key=lambda move: (move.cp_loss, _SEVERITY_SCORES[move.classification]),
+            )
+            side = _SIDE_NAMES[is_white]
+            score = (
+                total_loss
+                + sum(_SEVERITY_SCORES[move.classification] for move in moves)
+                + (len(moves) * 20)
+                + 40
+            )
+            candidates.append((
+                score,
+                ReviewLesson(
+                    priority=0,
+                    theme=LessonTheme.PHASE_PATTERN,
+                    title=f"{phase.value.capitalize()}: {side} leaked the most equity",
+                    finding=(
+                        f"{side} had {len(moves)} moves rated inaccuracy or worse in the "
+                        f"{phase.value} ({self._format_move_refs(moves)}), for roughly "
+                        f"{total_loss}cp lost."
+                    ),
+                    takeaway=self._phase_takeaway(phase, focus),
+                    focus_ply=focus.ply,
+                    related_plies=tuple(move.ply for move in moves),
+                    phase=phase,
+                    is_white=is_white,
+                ),
+            ))
+
+        return candidates
+
+    def _build_turning_point_candidate(
+        self,
+        reviewed: list[ReviewedMove],
+    ) -> tuple[int, ReviewLesson] | None:
+        focus = max(
+            reviewed,
+            key=lambda move: (move.cp_loss, _SEVERITY_SCORES[move.classification]),
+        )
+        if focus.cp_loss < _LESSON_TURNING_POINT_MIN_LOSS:
+            return None
+
+        side = _SIDE_NAMES[focus.is_white]
+        before_cp = self._mover_cp_before(focus)
+        after_cp = self._mover_cp_after(focus)
+        best_move = self._best_move_label(focus)
+        score = focus.cp_loss + _SEVERITY_SCORES[focus.classification] + 20
+
+        return (
+            score,
+            ReviewLesson(
+                priority=0,
+                theme=LessonTheme.TURNING_POINT,
+                title=f"Turning point: {self._move_ref(focus)}",
+                finding=(
+                    f"{self._move_ref(focus)} cost about {focus.cp_loss}cp for {side} "
+                    f"and {self._describe_turning_point(side, before_cp, after_cp)}. "
+                    f"Stockfish preferred {best_move}."
+                ),
+                takeaway=self._turning_point_takeaway(focus, before_cp),
+                focus_ply=focus.ply,
+                related_plies=(focus.ply,),
+                phase=focus.phase,
+                is_white=focus.is_white,
+            ),
+        )
+
+    def _build_advantage_management_candidate(
+        self,
+        reviewed: list[ReviewedMove],
+    ) -> tuple[int, ReviewLesson] | None:
+        candidates = [
+            move for move in reviewed
+            if (
+                self._mover_cp_before(move) >= _LESSON_ADVANTAGE_THRESHOLD
+                and move.cp_loss >= self._config.inaccuracy_threshold
+                and move.classification in _NOTABLE_CLASSIFICATIONS
+            )
+        ]
+        if not candidates:
+            return None
+
+        focus = max(
+            candidates,
+            key=lambda move: (move.cp_loss, _SEVERITY_SCORES[move.classification]),
+        )
+        side = _SIDE_NAMES[focus.is_white]
+        best_move = self._best_move_label(focus)
+        score = focus.cp_loss + _SEVERITY_SCORES[focus.classification] + 30
+
+        return (
+            score,
+            ReviewLesson(
+                priority=0,
+                theme=LessonTheme.ADVANTAGE_MANAGEMENT,
+                title=f"Advantage management: {side} let the edge slip",
+                finding=(
+                    f"Before {self._move_ref(focus)}, {side} was clearly better, "
+                    f"but the move gave away about {focus.cp_loss}cp. "
+                    f"Stockfish kept more control with {best_move}."
+                ),
+                takeaway=(
+                    "When better, first shortlist the move that cuts counterplay "
+                    f"before looking for something sharper, especially candidates like "
+                    f"{best_move}."
+                ),
+                focus_ply=focus.ply,
+                related_plies=(focus.ply,),
+                phase=focus.phase,
+                is_white=focus.is_white,
+            ),
+        )
+
+    def _phase_takeaway(self, phase: GamePhase, focus: ReviewedMove) -> str:
+        best_move = self._best_move_label(focus)
+        if phase is GamePhase.OPENING:
+            return (
+                "In similar openings, compare natural development with forcing "
+                f"alternatives such as {best_move} before committing."
+            )
+        if phase is GamePhase.ENDGAME:
+            return (
+                "In similar endgames, slow the position down and compare the "
+                f"cleanest technical continuation, such as {best_move}."
+            )
+        return (
+            "In similar middlegames, spend a quick scan on checks, captures, and "
+            f"threats before choosing a plan, especially against lines like {best_move}."
+        )
+
+    def _turning_point_takeaway(
+        self,
+        focus: ReviewedMove,
+        before_cp: int,
+    ) -> str:
+        best_move = self._best_move_label(focus)
+        if before_cp >= _LESSON_ADVANTAGE_THRESHOLD:
+            return (
+                "When a side is better, prefer the move that keeps control before "
+                f"looking for something sharper, and compare it with {best_move}."
+            )
+        if -_LESSON_EQUALITY_BAND <= before_cp <= _LESSON_EQUALITY_BAND:
+            return (
+                "In balanced positions, compare a candidate move with the engine's "
+                f"forcing alternative, such as {best_move}, before committing."
+            )
+        return (
+            "When the position can swing this fast, double-check forcing replies "
+            f"and the engine alternative {best_move} first."
+        )
+
+    def _describe_turning_point(
+        self,
+        side: str,
+        before_cp: int,
+        after_cp: int,
+    ) -> str:
+        if (
+            before_cp >= _LESSON_ADVANTAGE_THRESHOLD
+            and after_cp <= -_LESSON_EQUALITY_BAND
+        ):
+            return f"turned a clearly better position into a worse one for {side}"
+        if before_cp >= _LESSON_ADVANTAGE_THRESHOLD:
+            return f"gave away most of {side}'s advantage"
+        if (
+            -_LESSON_EQUALITY_BAND <= before_cp <= _LESSON_EQUALITY_BAND
+            and after_cp <= -_LESSON_ADVANTAGE_THRESHOLD
+        ):
+            return f"turned a roughly equal position into a clear disadvantage for {side}"
+        if before_cp <= -_LESSON_ADVANTAGE_THRESHOLD:
+            return "made an already difficult defense even harder"
+        return "created the sharpest evaluation swing in the game"
+
+    def _mover_cp_before(self, move: ReviewedMove) -> int:
+        white_cp = self._eval_to_cp(move.eval_before, from_white=move.is_white)
+        return white_cp if move.is_white else -white_cp
+
+    def _mover_cp_after(self, move: ReviewedMove) -> int:
+        white_cp = self._eval_to_cp(move.eval_after, from_white=not move.is_white)
+        return white_cp if move.is_white else -white_cp
+
+    @staticmethod
+    def _best_move_label(move: ReviewedMove) -> str:
+        if move.best_move_san:
+            return move.best_move_san
+        if move.best_move_uci:
+            return move.best_move_uci
+        return "the engine line"
+
+    def _format_move_refs(
+        self,
+        moves: list[ReviewedMove],
+        *,
+        max_items: int = 3,
+    ) -> str:
+        refs = [self._move_ref(move) for move in moves[:max_items]]
+        if len(moves) > max_items:
+            refs.append("...")
+        return ", ".join(refs)
+
+    @staticmethod
+    def _move_ref(move: ReviewedMove) -> str:
+        move_num = move.ply // 2 + 1
+        dot = "." if move.is_white else "..."
+        return f"{move_num}{dot} {move.san}"
+
     @staticmethod
     def _empty_review() -> GameReview:
         return GameReview(
@@ -553,5 +875,6 @@ class GameReviewer:
             white_avg_cp_loss=0.0,
             black_avg_cp_loss=0.0,
             critical_moments=(),
+            lessons=(),
             total_elapsed_ms=0.0,
         )

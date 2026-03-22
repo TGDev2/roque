@@ -5,9 +5,11 @@ from __future__ import annotations
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
+    LessonTheme,
     MoveClassification,
     PhaseSummary,
     ReviewConfig,
+    ReviewLesson,
     ReviewedMove,
 )
 from chesslab.analysis import Evaluation
@@ -33,6 +35,13 @@ class TestGamePhase:
         assert GamePhase.OPENING.value == "opening"
         assert GamePhase.MIDDLEGAME.value == "middlegame"
         assert GamePhase.ENDGAME.value == "endgame"
+
+
+class TestLessonTheme:
+    def test_values(self) -> None:
+        assert LessonTheme.PHASE_PATTERN.value == "phase_pattern"
+        assert LessonTheme.TURNING_POINT.value == "turning_point"
+        assert LessonTheme.ADVANTAGE_MANAGEMENT.value == "advantage_management"
 
 
 class TestReviewConfig:
@@ -93,11 +102,13 @@ class TestGameReview:
             white_avg_cp_loss=0.0,
             black_avg_cp_loss=0.0,
             critical_moments=(),
+            lessons=(),
             total_elapsed_ms=0.0,
         )
         assert len(review.moves) == 0
         assert review.white_avg_cp_loss == 0.0
         assert len(review.critical_moments) == 0
+        assert len(review.lessons) == 0
 
 
 class TestPhaseSummary:
@@ -110,3 +121,22 @@ class TestPhaseSummary:
         )
         assert ps.phase == GamePhase.OPENING
         assert ps.move_count == 10
+
+
+class TestReviewLesson:
+    def test_frozen(self) -> None:
+        lesson = ReviewLesson(
+            priority=1,
+            theme=LessonTheme.TURNING_POINT,
+            title="Turning point: 3...Nc6",
+            finding="3...Nc6 cost about 90cp for Black.",
+            takeaway="Compare forcing alternatives before committing.",
+            focus_ply=5,
+            related_plies=(3, 5),
+            phase=GamePhase.OPENING,
+            is_white=False,
+        )
+
+        assert lesson.priority == 1
+        assert lesson.theme is LessonTheme.TURNING_POINT
+        assert lesson.phase is GamePhase.OPENING

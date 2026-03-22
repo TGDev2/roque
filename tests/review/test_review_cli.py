@@ -14,8 +14,10 @@ from chesslab.review.__main__ import _format_review, main
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
+    LessonTheme,
     MoveClassification,
     PhaseSummary,
+    ReviewLesson,
     ReviewedMove,
 )
 from chesslab.analysis import Evaluation
@@ -62,6 +64,19 @@ def _make_dummy_review() -> tuple[GameReview, dict[str, str]]:
         white_avg_cp_loss=0.0,
         black_avg_cp_loss=0.0,
         critical_moments=(),
+        lessons=(
+            ReviewLesson(
+                priority=1,
+                theme=LessonTheme.TURNING_POINT,
+                title="Turning point: 1. e4",
+                finding="1. e4 created the sharpest swing in the game.",
+                takeaway="Compare forcing alternatives before committing.",
+                focus_ply=0,
+                related_plies=(0,),
+                phase=GamePhase.OPENING,
+                is_white=True,
+            ),
+        ),
         total_elapsed_ms=1234.0,
     )
 
@@ -114,6 +129,13 @@ class TestFormatReview:
         review, headers = _make_dummy_review()
         output = _format_review(review, headers)
         assert "ok" in output  # GOOD -> "ok"
+
+    def test_contains_lessons_section(self) -> None:
+        review, headers = _make_dummy_review()
+        output = _format_review(review, headers)
+        assert "Lessons:" in output
+        assert "Fact:" in output
+        assert "Lesson:" in output
 
 
 # ---------------------------------------------------------------------------

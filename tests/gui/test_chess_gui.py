@@ -16,7 +16,17 @@ from chesslab.analysis import AnalysisConfig
 from chesslab.coach.game_coach import PlayerColor
 from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
+from chesslab.review.game_reviewer import (
+    GamePhase,
+    GameReview,
+    LessonTheme,
+    MoveClassification,
+    PhaseSummary,
+    ReviewLesson,
+    ReviewedMove,
+)
 from chesslab.validation import CalibrationMetrics, CalibrationReport, load_support_catalog
+from chesslab.analysis import Evaluation
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +95,58 @@ def _make_report(*, passed: bool) -> CalibrationReport:
             p95_recognition_latency_ms=10.0,
             status_counts={"ready": 4} if passed else {"board_not_found": 2, "ready": 2},
         ),
+    )
+
+
+def _make_review_with_lesson() -> GameReview:
+    move = ReviewedMove(
+        ply=0,
+        san="e4",
+        uci="e2e4",
+        fen_before="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        classification=MoveClassification.MISTAKE,
+        eval_before=Evaluation(centipawns=150, mate_in=None),
+        eval_after=Evaluation(centipawns=-20, mate_in=None),
+        best_move_san="d4",
+        best_move_uci="d2d4",
+        best_eval=Evaluation(centipawns=150, mate_in=None),
+        cp_loss=130,
+        best_pv_san=("d4", "d5"),
+        phase=GamePhase.OPENING,
+        is_white=True,
+        is_forced=False,
+    )
+
+    return GameReview(
+        moves=(move,),
+        phase_summaries=(
+            PhaseSummary(
+                phase=GamePhase.OPENING,
+                move_count=1,
+                avg_cp_loss=130.0,
+                classification_counts={MoveClassification.MISTAKE: 1},
+            ),
+        ),
+        white_classification_counts={MoveClassification.MISTAKE: 1},
+        black_classification_counts={},
+        white_avg_cp_loss=130.0,
+        black_avg_cp_loss=0.0,
+        critical_moments=(0,),
+        lessons=(
+            ReviewLesson(
+                priority=1,
+                theme=LessonTheme.TURNING_POINT,
+                title="Turning point: 1. e4",
+                finding="1. e4 cost about 130cp for White.",
+                takeaway="Compare forcing alternatives before committing.",
+                focus_ply=0,
+                related_plies=(0,),
+                phase=GamePhase.OPENING,
+                is_white=True,
+            ),
+        ),
+        total_elapsed_ms=250.0,
     )
 
 
@@ -231,3 +293,25 @@ class TestObserveLiveHelpers:
 
         gui._stop_observation.assert_called_once()
         gui._start_review.assert_called_once_with(board)
+
+    def test_review_complete_wires_lesson_navigation(self) -> None:
+        gui = ChessGui()
+        gui._close_progress_dialog = MagicMock()
+        gui._play_mode_widgets = [MagicMock()]
+        gui._entry_frame = MagicMock()
+        gui._review_panel = MagicMock()
+        gui._review_nav = MagicMock()
+        gui._summary_panel = MagicMock()
+        gui._history_panel = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._set_status = MagicMock()
+        gui._review_navigate_to = MagicMock()
+
+        review = _make_review_with_lesson()
+
+        gui._on_review_complete(review)
+
+        callback = gui._summary_panel.update_summary.call_args.kwargs["on_lesson_click"]
+        callback(0)
+
+        gui._review_navigate_to.assert_called_with(1)

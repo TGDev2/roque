@@ -87,6 +87,21 @@ def _format_review(review: GameReview, headers: dict[str, str]) -> str:
 
     lines.append("")
 
+    # Prioritised lessons.
+    if review.lessons:
+        lines.append("Lessons:")
+        for lesson in review.lessons:
+            lines.append(
+                f"  {lesson.priority}. {lesson.title} "
+                f"[{_format_lesson_anchor(review, lesson.focus_ply)}]"
+            )
+            lines.append(f"     Fact: {lesson.finding}")
+            lines.append(f"     Lesson: {lesson.takeaway}")
+        lines.append("")
+    else:
+        lines.append("Lessons: no reliable lesson extracted.")
+        lines.append("")
+
     # Critical moments.
     if review.critical_moments:
         lines.append("Critical moments:")
@@ -113,6 +128,17 @@ def _format_review(review: GameReview, headers: dict[str, str]) -> str:
         )
 
     return "\n".join(lines)
+
+
+def _format_lesson_anchor(review: GameReview, focus_ply: int) -> str:
+    """Return a compact move reference for a lesson anchor."""
+    if focus_ply < 0 or focus_ply >= len(review.moves):
+        return "position"
+
+    move = review.moves[focus_ply]
+    move_num = move.ply // 2 + 1
+    dot = "." if move.is_white else "..."
+    return f"{move_num}{dot} {move.san}"
 
 
 def main() -> None:

@@ -2919,7 +2919,10 @@ class ChessGui:
             on_move_click=lambda ply: self._review_navigate_to(ply + 1),
         )
 
-        self._summary_panel.update_summary(review)
+        self._summary_panel.update_summary(
+            review,
+            on_lesson_click=self._review_jump_to_lesson,
+        )
         self._review_navigate_to(0)
 
         self._set_status(
@@ -3040,6 +3043,10 @@ class ChessGui:
 
     def _review_first(self) -> None:
         self._review_navigate_to(0)
+
+    def _review_jump_to_lesson(self, focus_ply: int) -> None:
+        """Jump to the move highlighted by a summary lesson."""
+        self._review_navigate_to(focus_ply + 1)
 
     def _review_prev(self) -> None:
         self._review_navigate_to(self._review_ply - 1)

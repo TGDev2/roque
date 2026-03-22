@@ -16,6 +16,7 @@ from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
     MoveClassification,
+    ReviewLesson,
     ReviewedMove,
 )
 
@@ -64,6 +65,7 @@ _CLS_LABELS: dict[MoveClassification, str] = {
     MoveClassification.FORCED: "Forced",
 }
 _HIGHLIGHT_BG = "#2a3a4c"
+_LESSON_BG = "#23283a"
 
 
 def _card_frame(parent: tk.Widget, **kwargs: object) -> tk.Frame:
@@ -709,10 +711,20 @@ class GameSummaryPanel(tk.Frame):
         self._content = tk.Frame(self._inner, bg=_CARD_BG)
         self._content.pack(fill="x", padx=8, pady=(0, 6))
 
-    def update_summary(self, review: GameReview) -> None:
+    def update_summary(
+        self,
+        review: GameReview,
+        *,
+        on_lesson_click: Callable[[int], None] | None = None,
+    ) -> None:
         """Populate summary from a completed review."""
         for w in self._content.winfo_children():
             w.destroy()
+
+        self._render_lessons(review, on_lesson_click=on_lesson_click)
+
+        divider = tk.Frame(self._content, bg=_CARD_BORDER, height=1)
+        divider.pack(fill="x", pady=(6, 6))
 
         # Classification distribution.
         cls_frame = tk.Frame(self._content, bg=_CARD_BG)
@@ -767,3 +779,154 @@ class GameSummaryPanel(tk.Frame):
                 bg=_CARD_BG, fg=_FG_DIM, font=("sans-serif", 8),
                 anchor="w",
             ).pack(side="left")
+
+    def _render_lessons(
+        self,
+        review: GameReview,
+        *,
+        on_lesson_click: Callable[[int], None] | None,
+    ) -> None:
+        section = tk.Frame(self._content, bg=_CARD_BG)
+        section.pack(fill="x")
+
+        tk.Label(
+            section, text="Lessons", bg=_CARD_BG, fg=_ACCENT,
+            font=("sans-serif", 9, "bold"), anchor="w",
+        ).pack(fill="x")
+
+        if not review.lessons:
+            tk.Label(
+                section,
+                text=(
+                    "No reliable lesson extracted for this game. This usually means "
+                    "the sample was too short or too low-swing to support a clear takeaway."
+                ),
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 8),
+                justify="left",
+                anchor="w",
+                wraplength=340,
+            ).pack(fill="x", pady=(4, 0))
+            return
+
+        for lesson in review.lessons:
+            self._render_lesson_card(
+                section,
+                review,
+                lesson,
+                on_lesson_click=on_lesson_click,
+            )
+
+    def _render_lesson_card(
+        self,
+        parent: tk.Frame,
+        review: GameReview,
+        lesson: ReviewLesson,
+        *,
+        on_lesson_click: Callable[[int], None] | None,
+    ) -> None:
+        outer = tk.Frame(parent, bg=_CARD_BORDER)
+        outer.pack(fill="x", pady=(6, 0))
+
+        inner = tk.Frame(outer, bg=_LESSON_BG)
+        inner.pack(fill="x", padx=1, pady=1)
+
+        header = tk.Frame(inner, bg=_LESSON_BG)
+        header.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            header,
+            text=f"#{lesson.priority}",
+            bg=_ACCENT_DIM,
+            fg="#ffffff",
+            font=("sans-serif", 8, "bold"),
+            padx=6,
+            pady=2,
+        ).pack(side="left")
+
+        tk.Label(
+            header,
+            text=lesson.title,
+            bg=_LESSON_BG,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        ).pack(side="left", fill="x", expand=True, padx=(8, 8))
+
+        anchor = self._format_lesson_anchor(review, lesson)
+        if on_lesson_click is not None:
+            tk.Button(
+                header,
+                text=f"Go to {anchor}",
+                command=lambda focus_ply=lesson.focus_ply: on_lesson_click(focus_ply),
+                font=("sans-serif", 8),
+                bg=_CARD_BG,
+                fg=_ACCENT,
+                activebackground=_ACCENT_DIM,
+                activeforeground="#ffffff",
+                relief="flat",
+                bd=0,
+                padx=6,
+                pady=3,
+                cursor="hand2",
+                highlightthickness=0,
+            ).pack(side="right")
+        else:
+            tk.Label(
+                header,
+                text=anchor,
+                bg=_LESSON_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 8),
+                anchor="e",
+            ).pack(side="right")
+
+        self._lesson_row(inner, "Fact", lesson.finding, _FG)
+        self._lesson_row(inner, "Lesson", lesson.takeaway, _FG_DIM)
+
+    @staticmethod
+    def _lesson_row(
+        parent: tk.Frame,
+        label: str,
+        text: str,
+        value_fg: str,
+    ) -> None:
+        row = tk.Frame(parent, bg=_LESSON_BG)
+        row.pack(fill="x", padx=8, pady=(0, 6))
+
+        tk.Label(
+            row,
+            text=f"{label}:",
+            bg=_LESSON_BG,
+            fg=_ACCENT if label == "Lesson" else _FG_DIM,
+            font=("sans-serif", 8, "bold"),
+            anchor="nw",
+            width=7,
+        ).pack(side="left")
+
+        tk.Label(
+            row,
+            text=text,
+            bg=_LESSON_BG,
+            fg=value_fg,
+            font=("sans-serif", 8),
+            justify="left",
+            anchor="w",
+            wraplength=300,
+        ).pack(side="left", fill="x", expand=True)
+
+    @staticmethod
+    def _format_lesson_anchor(review: GameReview, lesson: ReviewLesson) -> str:
+        if 0 <= lesson.focus_ply < len(review.moves):
+            move = review.moves[lesson.focus_ply]
+            move_num = move.ply // 2 + 1
+            dot = "." if move.is_white else "..."
+            phase = lesson.phase.value.capitalize() if lesson.phase is not None else "Game"
+            return f"{phase} {move_num}{dot} {move.san}"
+
+        if lesson.phase is not None:
+            return lesson.phase.value.capitalize()
+        return "position"
