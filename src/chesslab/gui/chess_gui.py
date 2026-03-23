@@ -252,6 +252,7 @@ class ChessGui:
         self._game_saved: bool = False
 
         # Review mode state.
+        self._from_observation: bool = False
         self._in_review_mode: bool = False
         self._game_review: GameReview | None = None
         self._review_ply: int = 0
@@ -842,6 +843,7 @@ class ChessGui:
             on_prev_error=self._review_prev_error,
             on_next_error=self._review_next_error,
             on_exit_review=self._exit_review_mode,
+            on_back_to_launcher=self._return_to_launcher,
         )
         self._summary_panel = GameSummaryPanel(panel_frame)
 
@@ -1742,11 +1744,20 @@ class ChessGui:
                 )
 
         elif event.type is ObservationEventType.NEW_GAME:
+            # Capture the finished game before syncing to the new position.
+            finished_board = self._coach.board
+            if finished_board.move_stack:
+                finished_board = finished_board.copy()
+
             if event.fen is not None:
                 self._sync_coach_to_fen(event.fen, auto_save_current=True)
             self._set_status(
                 event.tracking.message if event.tracking else "New game detected.",
             )
+
+            # Propose review of the just-finished game.
+            if finished_board.move_stack:
+                self._propose_observe_review(finished_board)
 
         elif event.type is ObservationEventType.RESYNC:
             if event.fen is not None:
@@ -1901,7 +1912,7 @@ class ChessGui:
             if self._undo_btn is not None:
                 self._undo_btn.config(
                     text="Stop Live",
-                    command=self._stop_observation,
+                    command=self._stop_observation_with_review_proposal,
                 )
             if self._observe_btn is not None:
                 self._observe_btn.config(
@@ -1969,21 +1980,140 @@ class ChessGui:
             "Observe Live stopped — Manual Coach restored. Enter moves yourself to continue."
         )
 
-    def _exit_observe_to_review(self) -> None:
-        """Leave passive observation and start a review explicitly."""
-        if self._coach is None:
-            self._set_status("No game to review", error=True)
-            return
-        board = self._coach.board
+    def _stop_observation_with_review_proposal(self) -> None:
+        """Stop observation and propose review if there are captured moves."""
+        if self._coach is not None:
+            board = self._coach.board
+            has_moves = bool(board.move_stack)
+            if has_moves:
+                board = board.copy()
+        else:
+            has_moves = False
+
+        self._stop_observation()
+        self._set_status("Live observation stopped.")
+
+        if has_moves:
+            self._propose_observe_review(board)
+
+    def _exit_observe_to_review(self, board: chess.Board | None = None) -> None:
+        """Leave passive observation and start a review.
+
+        Parameters
+        ----------
+        board:
+            If provided, use this board for the review (e.g. the finished game
+            captured before a new-game sync).  Otherwise fall back to the
+            current coach board.
+        """
+        if board is None:
+            if self._coach is None:
+                self._set_status("No game to review", error=True)
+                return
+            board = self._coach.board
+
         if not board.move_stack:
             self._set_status(
                 "No synced moves to review yet. Keep observing or exit to Manual Coach.",
                 error=True,
             )
             return
+
+        # Auto-save the observed game with observation-specific headers.
+        try:
+            headers = self._build_observe_headers(board)
+            path = self._storage.save_game(board, headers)
+            if path is not None:
+                logger.info("Observed game saved: %s", path)
+        except Exception:
+            logger.exception("Failed to save observed game before review.")
+
         if self._observing:
             self._stop_observation()
+
+        self._from_observation = True
         self._start_review(board)
+
+    def _propose_observe_review(self, board: chess.Board) -> None:
+        """Show a dialog proposing to review a just-finished observed game."""
+        if not board.move_stack:
+            return
+
+        assert self._root is not None
+        move_count = len(board.move_stack)
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Game finished")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=24, pady=20)
+
+        tk.Label(
+            container,
+            text="Analyse this game?",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 13, "bold"),
+        ).pack(pady=(0, 6))
+
+        outcome = board.outcome()
+        if outcome is not None:
+            result_text = board.result()
+        else:
+            result_text = "incomplete"
+
+        tk.Label(
+            container,
+            text=f"{move_count} moves captured \u2014 {result_text}",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 10),
+        ).pack(pady=(0, 14))
+
+        btn_row = tk.Frame(container, bg=_BG)
+        btn_row.pack(fill="x")
+
+        def on_review() -> None:
+            dialog.destroy()
+            self._exit_observe_to_review(board)
+
+        def on_skip() -> None:
+            dialog.destroy()
+
+        _styled_button(
+            btn_row,
+            text="\u25b6  Analyse this game",
+            command=on_review,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 10, "bold"),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        _styled_button(
+            btn_row,
+            text="Continue observing",
+            command=on_skip,
+            font=("sans-serif", 10),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     def _sync_coach_to_fen(
         self,
@@ -2388,6 +2518,33 @@ class ChessGui:
             engine_elo=self._engine_elo,
             result=result,
         )
+
+    def _build_observe_headers(self, board: chess.Board) -> dict[str, str]:
+        """Build PGN headers for a game observed via Observe Live."""
+        from datetime import datetime
+
+        outcome = board.outcome()
+        result = board.result() if outcome is not None else "*"
+
+        setup_id = (
+            self._last_observer_config.setup_id
+            if self._last_observer_config is not None
+            else None
+        )
+
+        headers: dict[str, str] = {
+            "Event": "Observed via ChessLab",
+            "Site": "ChessLab",
+            "Date": datetime.now().strftime("%Y.%m.%d"),
+            "White": "?",
+            "Black": "?",
+            "Result": result,
+            "Annotator": "ChessLab Observe Live",
+        }
+        if setup_id:
+            headers["Source"] = f"Observe Live — {setup_id}"
+
+        return headers
 
     def _auto_save(self) -> None:
         """Auto-save the current game if it has moves."""
@@ -2925,6 +3082,10 @@ class ChessGui:
         )
         self._review_navigate_to(0)
 
+        # Show "Back to Launcher" when reviewing a game from Observe Live.
+        if self._review_nav is not None:
+            self._review_nav.show_launcher_button(self._from_observation)
+
         self._set_status(
             f"Review mode \u2014 post-game analysis for {len(review.moves)} moves "
             f"in {review.total_elapsed_ms / 1000:.1f}s",
@@ -2948,6 +3109,7 @@ class ChessGui:
             return
 
         self._in_review_mode = False
+        self._from_observation = False
         self._game_review = None
         self._review_ply = 0
         self._review_positions = []
@@ -2978,8 +3140,19 @@ class ChessGui:
 
         if self._review_panel is not None:
             self._review_panel.clear()
+        if self._review_nav is not None:
+            self._review_nav.show_launcher_button(False)
         self._set_status("Exited review mode")
         logger.info("Review mode exited.")
+
+    def _return_to_launcher(self) -> None:
+        """Exit review mode and re-show the startup launcher dialog."""
+        self._exit_review_mode()
+
+        if self._root is None:
+            return
+        mode = self._show_startup_dialog(self._root)
+        self._apply_startup_mode(mode)
 
     # -- Review navigation ---------------------------------------------------
 

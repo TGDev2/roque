@@ -624,8 +624,11 @@ class ReviewNavigationPanel(tk.Frame):
         on_prev_error: Callable[[], None],
         on_next_error: Callable[[], None],
         on_exit_review: Callable[[], None],
+        on_back_to_launcher: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent, bg=_BG)
+
+        self._on_back_to_launcher = on_back_to_launcher
 
         nav_row = tk.Frame(self, bg=_BG)
         nav_row.pack(fill="x")
@@ -676,6 +679,26 @@ class ReviewNavigationPanel(tk.Frame):
         )
         exit_btn.pack(side="left", fill="x", expand=True, padx=(1, 0))
 
+        # Optional "Back to Launcher" row — shown/hidden dynamically.
+        self._launcher_row = tk.Frame(self, bg=_BG)
+        self._launcher_btn = tk.Button(
+            self._launcher_row,
+            text="\u2302  Back to Launcher",
+            command=self._on_back_to_launcher or (lambda: None),
+            font=("sans-serif", 9),
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            activebackground=_ACCENT_DIM,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=6,
+            pady=3,
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self._launcher_btn.pack(fill="x")
+
         # Position indicator.
         self._pos_label = tk.Label(
             self, text="", bg=_BG, fg=_FG_DIM,
@@ -686,6 +709,13 @@ class ReviewNavigationPanel(tk.Frame):
     def update_position(self, current_ply: int, total_plies: int) -> None:
         """Update the position indicator text."""
         self._pos_label.config(text=f"Move {current_ply} / {total_plies}")
+
+    def show_launcher_button(self, visible: bool) -> None:
+        """Show or hide the 'Back to Launcher' button."""
+        if visible and self._on_back_to_launcher is not None:
+            self._launcher_row.pack(fill="x", pady=(2, 0), before=self._pos_label)
+        else:
+            self._launcher_row.pack_forget()
 
 
 # ---------------------------------------------------------------------------
