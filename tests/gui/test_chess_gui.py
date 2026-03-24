@@ -157,6 +157,13 @@ def _make_review_with_lesson() -> GameReview:
     )
 
 
+def _make_checkmate_board() -> chess.Board:
+    board = chess.Board()
+    for san in ("f3", "e5", "g4", "Qh4#"):
+        board.push_san(san)
+    return board
+
+
 class TestObserveLiveHelpers:
     def test_format_preflight_report_surfaces_actions(self) -> None:
         gui = ChessGui()
@@ -333,3 +340,101 @@ class TestObserveLiveHelpers:
         gui._apply_startup_mode(StartupJourneyMode.PROGRESSION)
 
         gui._show_progression_dialog.assert_called_once()
+
+
+class TestManualCoachReviewOffer:
+    def test_submit_san_offers_review_when_player_move_finishes_game(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._coach.is_player_turn = True
+        gui._coach.is_game_over = True
+        gui._refresh_after_move = MagicMock()
+        gui._handle_finished_manual_game = MagicMock()
+
+        gui._submit_san("Qxf7#")
+
+        gui._coach.submit_player_move.assert_called_once_with("Qxf7#")
+        gui._handle_finished_manual_game.assert_called_once()
+        gui._coach.submit_opponent_move_continuous.assert_not_called()
+
+    def test_submit_san_skips_loading_state_when_opponent_move_finishes_game(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._coach.is_player_turn = False
+        gui._coach.is_game_over = True
+        gui._refresh_after_move = MagicMock()
+        gui._handle_finished_manual_game = MagicMock()
+        gui._eval_panel = MagicMock()
+
+        handle = MagicMock()
+        gui._coach.submit_opponent_move_continuous.return_value = handle
+
+        gui._submit_san("Qh4#")
+
+        gui._coach.stop_analysis.assert_called_once()
+        gui._coach.submit_opponent_move_continuous.assert_called_once()
+        gui._handle_finished_manual_game.assert_called_once()
+        gui._eval_panel.update_eval.assert_not_called()
+
+    def test_handle_finished_manual_game_auto_saves_and_offers_review(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._coach.board = _make_checkmate_board()
+        gui._clear_coaching_outputs = MagicMock()
+        gui._auto_save = MagicMock()
+        gui._propose_manual_review = MagicMock()
+
+        gui._handle_finished_manual_game()
+
+        gui._clear_coaching_outputs.assert_called_once()
+        gui._auto_save.assert_called_once()
+        proposed_board = gui._propose_manual_review.call_args.args[0]
+        assert proposed_board.result() == "0-1"
+        assert len(proposed_board.move_stack) == 4
+
+    def test_new_game_closes_post_game_review_prompt(self) -> None:
+        gui = ChessGui()
+        gui._auto_save = MagicMock()
+        gui._coach = MagicMock()
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._suggestions_panel = MagicMock()
+        gui._history_panel = MagicMock()
+        gui._update_turn_status = MagicMock()
+        gui._root = MagicMock()
+        gui._show_color_dialog = MagicMock(
+            return_value=(PlayerColor.WHITE, AnalysisConfig.DEFAULT_ENGINE_ELO)
+        )
+
+        new_coach = MagicMock()
+        new_coach.current_fen = chess.Board().fen()
+        gui._create_coach = MagicMock(return_value=new_coach)
+
+        dialog = MagicMock()
+        dialog.winfo_exists.return_value = True
+        gui._post_game_review_dialog = dialog
+
+        gui._on_new_game()
+
+        dialog.destroy.assert_called_once()
+
+    def test_return_to_launcher_closes_post_game_review_prompt(self) -> None:
+        gui = ChessGui()
+        gui._exit_review_mode = MagicMock()
+        gui._root = MagicMock()
+        gui._show_startup_dialog = MagicMock(
+            return_value=StartupJourneyMode.MANUAL_COACH
+        )
+        gui._apply_startup_mode = MagicMock()
+
+        dialog = MagicMock()
+        dialog.winfo_exists.return_value = True
+        gui._post_game_review_dialog = dialog
+
+        gui._return_to_launcher()
+
+        dialog.destroy.assert_called_once()
+        gui._show_startup_dialog.assert_called_once_with(gui._root)
+        gui._apply_startup_mode.assert_called_once_with(
+            StartupJourneyMode.MANUAL_COACH
+        )

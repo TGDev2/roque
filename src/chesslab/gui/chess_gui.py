@@ -272,6 +272,7 @@ class ChessGui:
         self._review_queue: queue.Queue[int | GameReview | Exception] = queue.Queue()
         self._progress_dialog: tk.Toplevel | None = None
         self._progress_bar: ttk.Progressbar | None = None
+        self._post_game_review_dialog: tk.Toplevel | None = None
 
         # Widgets (populated by _build_window).
         self._observe_btn: tk.Button | None = None
@@ -2305,6 +2306,8 @@ class ChessGui:
             if self._coach.is_player_turn:
                 self._coach.submit_player_move(san)
                 self._refresh_after_move()
+                if self._coach.is_game_over:
+                    self._handle_finished_manual_game()
             else:
                 # Stop previous analysis.
                 self._coach.stop_analysis()
@@ -2315,6 +2318,10 @@ class ChessGui:
                 )
                 self._current_handle = handle
                 self._refresh_after_move()
+
+                if self._coach.is_game_over:
+                    self._handle_finished_manual_game()
+                    return
 
                 # Show loading state.
                 assert self._eval_panel is not None
@@ -2442,6 +2449,19 @@ class ChessGui:
                 waiting=True,
             )
 
+    def _handle_finished_manual_game(self) -> None:
+        """Auto-save a finished manual game and offer a post-game review."""
+        if self._coach is None:
+            return
+
+        board = self._coach.board
+        if not board.move_stack:
+            return
+
+        self._clear_coaching_outputs()
+        self._auto_save()
+        self._propose_manual_review(board)
+
     def _set_status(
         self,
         text: str,
@@ -2475,6 +2495,7 @@ class ChessGui:
 
     def _on_new_game(self) -> None:
         """Start a new game."""
+        self._close_post_game_review_dialog()
         if self._in_review_mode:
             self._exit_review_mode()
         self._auto_save()
@@ -2529,6 +2550,7 @@ class ChessGui:
 
     def _on_close(self) -> None:
         """Clean up resources and close the window."""
+        self._close_post_game_review_dialog()
         self._auto_save()
         if self._observer is not None:
             self._observer.stop()
@@ -2659,6 +2681,7 @@ class ChessGui:
 
     def _load_pgn_file(self, file_path: Path) -> None:
         """Load a PGN from the given path into the GUI."""
+        self._close_post_game_review_dialog()
         try:
             record = GameStorage.load_game(file_path)
         except Exception as exc:
@@ -3125,6 +3148,7 @@ class ChessGui:
 
     def _start_review(self, board: chess.Board) -> None:
         """Begin post-game review: show progress, launch background analysis."""
+        self._close_post_game_review_dialog()
         if self._observing:
             self._stop_observation()
         if self._in_review_mode:
@@ -3359,12 +3383,135 @@ class ChessGui:
 
     def _return_to_launcher(self) -> None:
         """Exit review mode and re-show the startup launcher dialog."""
+        self._close_post_game_review_dialog()
         self._exit_review_mode()
 
         if self._root is None:
             return
         mode = self._show_startup_dialog(self._root)
         self._apply_startup_mode(mode)
+
+    def _close_post_game_review_dialog(self) -> None:
+        """Dismiss the non-blocking post-game review prompt, if present."""
+        if self._post_game_review_dialog is None:
+            return
+
+        dialog = self._post_game_review_dialog
+        self._post_game_review_dialog = None
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except tk.TclError:
+            pass
+
+    def _propose_manual_review(self, board: chess.Board) -> None:
+        """Offer a post-game review for a finished Manual Coach game."""
+        if not board.move_stack or self._root is None:
+            return
+
+        self._auto_save()
+        self._close_post_game_review_dialog()
+
+        move_count = len(board.move_stack)
+        result_text = board.result() if board.outcome() is not None else "incomplete"
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Game finished")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_post_game_review_dialog)
+        self._post_game_review_dialog = dialog
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=24, pady=20)
+
+        tk.Label(
+            container,
+            text="Review this Manual Coach game?",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 13, "bold"),
+        ).pack(pady=(0, 6))
+
+        tk.Label(
+            container,
+            text=(
+                f"{move_count} moves saved \u2014 {result_text}\n"
+                "Launch a full review now, start a new game, or head back to the launcher."
+            ),
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 10),
+            justify="center",
+        ).pack(pady=(0, 14))
+
+        primary_row = tk.Frame(container, bg=_BG)
+        primary_row.pack(fill="x")
+
+        def on_review() -> None:
+            self._close_post_game_review_dialog()
+            self._start_review(board)
+
+        def on_new_game() -> None:
+            self._close_post_game_review_dialog()
+            self._on_new_game()
+
+        def on_launcher() -> None:
+            self._close_post_game_review_dialog()
+            self._return_to_launcher()
+
+        _styled_button(
+            primary_row,
+            text="\u25b6  Analyse this game",
+            command=on_review,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 10, "bold"),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        _styled_button(
+            primary_row,
+            text="New game",
+            command=on_new_game,
+            font=("sans-serif", 10),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        secondary_row = tk.Frame(container, bg=_BG)
+        secondary_row.pack(fill="x", pady=(8, 0))
+
+        _styled_button(
+            secondary_row,
+            text="Back to launcher",
+            command=on_launcher,
+            font=("sans-serif", 10),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        _styled_button(
+            secondary_row,
+            text="Later",
+            command=self._close_post_game_review_dialog,
+            font=("sans-serif", 10),
+            padx=12,
+            pady=6,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     # -- Review navigation ---------------------------------------------------
 
