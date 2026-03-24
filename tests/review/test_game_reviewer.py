@@ -27,6 +27,7 @@ from chesslab.analysis.position_analyser import (
     PositionAnalyser,
 )
 from chesslab.review.game_reviewer import (
+    ErrorMotif,
     GamePhase,
     GameReview,
     GameReviewer,
@@ -144,6 +145,40 @@ def _review_with_mock(
             cancel_event=cancel_event,
         )
     return review
+
+
+def _review_with_mock_mate(
+    board: chess.Board,
+    eval_specs: list[tuple[int | None, int | None]],
+    config: ReviewConfig | None = None,
+    best_moves_uci: list[str] | None = None,
+) -> GameReview:
+    """Run a review with mocked engine returning cp or mate evaluations."""
+    reviewer = GameReviewer(config or ReviewConfig())
+
+    root = board.copy()
+    while root.move_stack:
+        root.pop()
+    replay = root
+    fens = [replay.fen()]
+    for move in board.move_stack:
+        replay.push(move)
+        fens.append(replay.fen())
+
+    with patch(
+        "chesslab.review.game_reviewer.PositionAnalyser",
+    ) as MockAnalyser:
+        instance = MagicMock()
+        MockAnalyser.return_value = instance
+        instance.start = MagicMock()
+        instance.stop = MagicMock()
+        instance.analyse.side_effect = lambda fen: _dispatch_analyse_with_mate(
+            fen,
+            fens,
+            eval_specs,
+            best_moves_uci,
+        )
+        return reviewer.review(board)
 
 
 def _dispatch_analyse(
@@ -476,6 +511,105 @@ class TestLessonExtraction:
         board = _make_board("e4")
         review = _review_with_mock(board, evals_cp=[20, -18])
         assert review.lessons == ()
+
+
+class TestErrorMotifDetection:
+    def test_tags_missed_tactic_when_best_move_wins_material(self) -> None:
+        board = chess.Board("4k3/8/8/4q3/8/4Q3/8/6K1 w - - 0 1")
+        board.push_san("Qd3")
+
+        review = _review_with_mock(
+            board,
+            evals_cp=[300, -20],
+            best_moves_uci=["e3e5"],
+        )
+
+        assert review.moves[0].classification is MoveClassification.BLUNDER
+        assert review.moves[0].error_motif is ErrorMotif.MISSED_TACTIC
+
+    def test_tags_material_loss_when_move_hangs_major_piece(self) -> None:
+        board = chess.Board("4k3/8/5n2/8/8/8/8/3QK3 w - - 0 1")
+        board.push_san("Qh5")
+
+        review = _review_with_mock(
+            board,
+            evals_cp=[220, 0],
+            best_moves_uci=["d1e2"],
+        )
+
+        assert review.moves[0].classification is MoveClassification.BLUNDER
+        assert review.moves[0].error_motif is ErrorMotif.MATERIAL_LOSS
+
+    def test_tags_pawn_structure_when_move_creates_doubled_pawns(self) -> None:
+        board = chess.Board("4k3/8/8/8/8/3p4/2PP4/4K3 w - - 0 1")
+        board.push_san("cxd3")
+
+        review = _review_with_mock(
+            board,
+            evals_cp=[150, 0],
+            best_moves_uci=["e1f2"],
+        )
+
+        assert review.moves[0].classification is MoveClassification.MISTAKE
+        assert review.moves[0].error_motif is ErrorMotif.PAWN_STRUCTURE
+
+    def test_tags_king_safety_when_move_allows_forced_mate(self) -> None:
+        board = _make_board("f3")
+
+        review = _review_with_mock_mate(
+            board,
+            eval_specs=[(20, None), (None, 1)],
+            best_moves_uci=["e2e4"],
+        )
+
+        assert review.moves[0].classification is MoveClassification.BLUNDER
+        assert review.moves[0].error_motif is ErrorMotif.KING_SAFETY
+
+    def test_tags_piece_activity_when_best_move_develops_piece(self) -> None:
+        board = _make_board("h3")
+
+        review = _review_with_mock(
+            board,
+            evals_cp=[120, 0],
+            best_moves_uci=["g1f3"],
+        )
+
+        assert review.moves[0].classification is MoveClassification.MISTAKE
+        assert review.moves[0].error_motif is ErrorMotif.PIECE_ACTIVITY
+
+    def test_tags_endgame_error_as_fallback_for_quiet_endgame_mistake(self) -> None:
+        reviewer = GameReviewer()
+        board_before = chess.Board("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+        played_move = chess.Move.from_uci("e1d2")
+        board_after_actual = board_before.copy(stack=False)
+        board_after_actual.push(played_move)
+
+        result_before = _dispatch_analyse(
+            board_before.fen(),
+            [board_before.fen()],
+            [140],
+            ["e2e4"],
+        )
+        result_after = _dispatch_analyse(
+            board_after_actual.fen(),
+            [board_after_actual.fen()],
+            [0],
+            None,
+        )
+
+        motif = reviewer._detect_error_motif(
+            classification=MoveClassification.MISTAKE,
+            phase=GamePhase.ENDGAME,
+            board_before=board_before,
+            board_after_actual=board_after_actual,
+            played_move=played_move,
+            best_move_uci="e2e4",
+            result_before=result_before,
+            result_after=result_after,
+            is_white=True,
+        )
+
+        assert motif is ErrorMotif.ENDGAME_ERROR
 
     def test_low_signal_game_skips_lessons(self) -> None:
         board = _make_board("e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5")

@@ -81,6 +81,18 @@ class LessonTheme(Enum):
     ADVANTAGE_MANAGEMENT = "advantage_management"
 
 
+class ErrorMotif(Enum):
+    """Likely reason behind a significant review error."""
+
+    MISSED_TACTIC = "tactique_ratee"
+    MATERIAL_LOSS = "perte_de_materiel"
+    PAWN_STRUCTURE = "structure_de_pions"
+    PIECE_ACTIVITY = "activite_des_pieces"
+    KING_SAFETY = "securite_du_roi"
+    ENDGAME_ERROR = "erreur_de_finale"
+    UNKNOWN = "motif_inconnu"
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -172,6 +184,7 @@ class ReviewedMove:
     phase: GamePhase
     is_white: bool
     is_forced: bool
+    error_motif: ErrorMotif = ErrorMotif.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -212,6 +225,19 @@ class GameReview:
     critical_moments: tuple[int, ...]
     lessons: tuple[ReviewLesson, ...]
     total_elapsed_ms: float
+
+
+@dataclass(frozen=True)
+class _PawnStructureProfile:
+    """Lightweight pawn-structure features for motif detection."""
+
+    islands: int
+    doubled_pawns: int
+    isolated_pawns: int
+
+    @property
+    def weakness_score(self) -> int:
+        return self.islands + (self.doubled_pawns * 2) + self.isolated_pawns
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +362,7 @@ class GameReviewer:
                 raise ReviewCancelledError("Review cancelled by user.")
 
             fen_before = replay.fen()
+            board_before = replay.copy(stack=False)
             san = replay.san(move)
             uci = move.uci()
             is_white = replay.turn == chess.WHITE
@@ -344,6 +371,7 @@ class GameReviewer:
 
             replay.push(move)
             fen_after = replay.fen()
+            board_after_actual = replay.copy(stack=False)
 
             result_after = analyser.analyse(fen_after)
             evals.append(result_after)
@@ -366,6 +394,17 @@ class GameReviewer:
                 if result_before.variations
                 else ()
             )
+            error_motif = self._detect_error_motif(
+                classification=classification,
+                phase=phase,
+                board_before=board_before,
+                board_after_actual=board_after_actual,
+                played_move=move,
+                best_move_uci=best_move_uci,
+                result_before=result_before,
+                result_after=result_after,
+                is_white=is_white,
+            )
 
             reviewed.append(ReviewedMove(
                 ply=ply,
@@ -384,6 +423,7 @@ class GameReviewer:
                 phase=phase,
                 is_white=is_white,
                 is_forced=is_forced,
+                error_motif=error_motif,
             ))
 
             if progress_callback is not None:
@@ -497,6 +537,405 @@ class GameReviewer:
             return True
 
         return False
+
+    def _detect_error_motif(
+        self,
+        *,
+        classification: MoveClassification,
+        phase: GamePhase,
+        board_before: chess.Board,
+        board_after_actual: chess.Board,
+        played_move: chess.Move,
+        best_move_uci: str,
+        result_before: AnalysisResult,
+        result_after: AnalysisResult,
+        is_white: bool,
+    ) -> ErrorMotif:
+        """Assign a coarse but reliable motif to a significant error."""
+        if classification not in _NOTABLE_CLASSIFICATIONS:
+            return ErrorMotif.UNKNOWN
+
+        mover = chess.WHITE if is_white else chess.BLACK
+        best_move = self._parse_legal_move(board_before, best_move_uci)
+        board_after_best = self._after_move(board_before, best_move)
+        if board_after_best is None:
+            board_after_best = board_after_actual
+
+        if self._missed_forced_mate(result_before):
+            return ErrorMotif.MISSED_TACTIC
+        if self._allowed_forced_mate(result_after):
+            return ErrorMotif.KING_SAFETY
+        if self._is_material_loss_issue(
+            board_before,
+            board_after_actual,
+            board_after_best,
+            mover=mover,
+            best_move=best_move,
+        ):
+            return ErrorMotif.MATERIAL_LOSS
+        if self._is_missed_tactic(
+            board_before,
+            board_after_actual,
+            board_after_best,
+            played_move=played_move,
+            best_move=best_move,
+            mover=mover,
+            result_before=result_before,
+        ):
+            return ErrorMotif.MISSED_TACTIC
+        if self._is_king_safety_issue(
+            board_after_actual,
+            board_after_best,
+            mover=mover,
+        ):
+            return ErrorMotif.KING_SAFETY
+        if self._is_pawn_structure_issue(
+            board_before,
+            board_after_actual,
+            board_after_best,
+            mover=mover,
+        ):
+            return ErrorMotif.PAWN_STRUCTURE
+        if phase is GamePhase.ENDGAME:
+            return ErrorMotif.ENDGAME_ERROR
+        if self._is_piece_activity_issue(
+            board_after_actual,
+            board_after_best,
+            mover=mover,
+        ):
+            return ErrorMotif.PIECE_ACTIVITY
+        return ErrorMotif.UNKNOWN
+
+    @staticmethod
+    def _parse_legal_move(
+        board: chess.Board,
+        move_uci: str,
+    ) -> chess.Move | None:
+        if not move_uci:
+            return None
+        try:
+            move = chess.Move.from_uci(move_uci)
+        except ValueError:
+            return None
+        if move not in board.legal_moves:
+            return None
+        return move
+
+    @staticmethod
+    def _after_move(
+        board: chess.Board,
+        move: chess.Move | None,
+    ) -> chess.Board | None:
+        if move is None:
+            return None
+        updated = board.copy(stack=False)
+        updated.push(move)
+        return updated
+
+    @staticmethod
+    def _missed_forced_mate(result_before: AnalysisResult) -> bool:
+        evaluation = result_before.evaluation
+        return bool(
+            evaluation.is_mate
+            and evaluation.mate_in is not None
+            and evaluation.mate_in > 0
+        )
+
+    @staticmethod
+    def _allowed_forced_mate(result_after: AnalysisResult) -> bool:
+        evaluation = result_after.evaluation
+        return bool(
+            evaluation.is_mate
+            and evaluation.mate_in is not None
+            and evaluation.mate_in > 0
+        )
+
+    def _is_king_safety_issue(
+        self,
+        board_after_actual: chess.Board,
+        board_after_best: chess.Board,
+        *,
+        mover: chess.Color,
+    ) -> bool:
+        actual_danger = self._king_danger_score(board_after_actual, mover)
+        best_danger = self._king_danger_score(board_after_best, mover)
+        actual_checks = self._count_checking_moves(board_after_actual)
+        best_checks = self._count_checking_moves(board_after_best)
+        return bool(
+            actual_checks >= best_checks + 2
+            or (
+                actual_checks > best_checks
+                and actual_danger >= best_danger + 2
+            )
+            or actual_danger >= best_danger + 4
+        )
+
+    def _is_material_loss_issue(
+        self,
+        board_before: chess.Board,
+        board_after_actual: chess.Board,
+        board_after_best: chess.Board,
+        *,
+        mover: chess.Color,
+        best_move: chess.Move | None,
+    ) -> bool:
+        before_balance = self._material_balance(board_before, mover)
+        actual_balance = self._material_balance(board_after_actual, mover)
+        best_balance = self._material_balance(board_after_best, mover)
+        actual_hanging = self._hanging_material_loss(board_after_actual, mover)
+        best_hanging = self._hanging_material_loss(board_after_best, mover)
+
+        if before_balance - actual_balance >= 1:
+            return True
+        if actual_hanging >= 3 and actual_hanging >= best_hanging + 2:
+            return True
+        if (
+            best_balance - actual_balance >= 2
+            and not self._is_forcing_move(board_before, board_after_best, best_move)
+        ):
+            return True
+        return False
+
+    def _is_missed_tactic(
+        self,
+        board_before: chess.Board,
+        board_after_actual: chess.Board,
+        board_after_best: chess.Board,
+        *,
+        played_move: chess.Move,
+        best_move: chess.Move | None,
+        mover: chess.Color,
+        result_before: AnalysisResult,
+    ) -> bool:
+        if best_move is None:
+            return False
+
+        best_capture_value = self._captured_piece_value(board_before, best_move)
+        actual_capture_value = self._captured_piece_value(board_before, played_move)
+        best_balance = self._material_balance(board_after_best, mover)
+        actual_balance = self._material_balance(board_after_actual, mover)
+        best_threat = self._hanging_material_loss(board_after_best, not mover)
+        actual_threat = self._hanging_material_loss(board_after_actual, not mover)
+        best_is_forcing = self._is_forcing_move(
+            board_before,
+            board_after_best,
+            best_move,
+        )
+
+        if not best_is_forcing:
+            return False
+        if best_balance - actual_balance >= 1:
+            return True
+        if best_capture_value >= 3 and best_capture_value > actual_capture_value:
+            return True
+        if best_threat >= max(3, actual_threat + 2):
+            return True
+        if (
+            board_after_best.is_check()
+            and not board_after_actual.is_check()
+            and (
+                best_capture_value > 0
+                or best_threat >= 3
+                or self._missed_forced_mate(result_before)
+            )
+        ):
+            return True
+        return False
+
+    def _is_pawn_structure_issue(
+        self,
+        board_before: chess.Board,
+        board_after_actual: chess.Board,
+        board_after_best: chess.Board,
+        *,
+        mover: chess.Color,
+    ) -> bool:
+        before = self._pawn_structure_profile(board_before, mover)
+        actual = self._pawn_structure_profile(board_after_actual, mover)
+        best = self._pawn_structure_profile(board_after_best, mover)
+
+        baseline = max(before.weakness_score, best.weakness_score)
+        if actual.weakness_score < baseline + 2:
+            return False
+
+        return bool(
+            actual.doubled_pawns > max(before.doubled_pawns, best.doubled_pawns)
+            or actual.islands > max(before.islands, best.islands)
+            or actual.isolated_pawns > max(before.isolated_pawns, best.isolated_pawns)
+        )
+
+    def _is_piece_activity_issue(
+        self,
+        board_after_actual: chess.Board,
+        board_after_best: chess.Board,
+        *,
+        mover: chess.Color,
+    ) -> bool:
+        actual_activity = self._piece_activity_score(board_after_actual, mover)
+        best_activity = self._piece_activity_score(board_after_best, mover)
+        return best_activity >= actual_activity + 4
+
+    @staticmethod
+    def _material_balance(board: chess.Board, color: chess.Color) -> int:
+        own = 0
+        opp = 0
+        for piece_type, value in _PIECE_VALUES.items():
+            own += len(board.pieces(piece_type, color)) * value
+            opp += len(board.pieces(piece_type, not color)) * value
+        return own - opp
+
+    @staticmethod
+    def _captured_piece_value(
+        board: chess.Board,
+        move: chess.Move,
+    ) -> int:
+        if board.is_en_passant(move):
+            return _PIECE_VALUES[chess.PAWN]
+        captured = board.piece_at(move.to_square)
+        if captured is None:
+            return 0
+        return _PIECE_VALUES.get(captured.piece_type, 0)
+
+    def _is_forcing_move(
+        self,
+        board_before: chess.Board,
+        board_after: chess.Board,
+        move: chess.Move | None,
+    ) -> bool:
+        if move is None:
+            return False
+        return bool(
+            self._captured_piece_value(board_before, move) > 0
+            or move.promotion is not None
+            or board_after.is_check()
+        )
+
+    @staticmethod
+    def _pawn_structure_profile(
+        board: chess.Board,
+        color: chess.Color,
+    ) -> _PawnStructureProfile:
+        file_counts = [0] * 8
+        for square in board.pieces(chess.PAWN, color):
+            file_counts[chess.square_file(square)] += 1
+
+        occupied_files = [index for index, count in enumerate(file_counts) if count]
+        islands = 0
+        previous_file: int | None = None
+        for file_index in occupied_files:
+            if previous_file is None or file_index != previous_file + 1:
+                islands += 1
+            previous_file = file_index
+
+        doubled = sum(max(0, count - 1) for count in file_counts)
+        isolated = 0
+        for file_index, count in enumerate(file_counts):
+            if count == 0:
+                continue
+            left = file_counts[file_index - 1] if file_index > 0 else 0
+            right = file_counts[file_index + 1] if file_index < 7 else 0
+            if left == 0 and right == 0:
+                isolated += count
+
+        return _PawnStructureProfile(
+            islands=islands,
+            doubled_pawns=doubled,
+            isolated_pawns=isolated,
+        )
+
+    @staticmethod
+    def _piece_activity_score(
+        board: chess.Board,
+        color: chess.Color,
+    ) -> int:
+        score = 0
+        home_rank = 0 if color == chess.WHITE else 7
+
+        for square, piece in board.piece_map().items():
+            if piece.color != color or piece.piece_type == chess.PAWN:
+                continue
+
+            score += len(board.attacks(square))
+
+            if piece.piece_type in (chess.KNIGHT, chess.BISHOP):
+                if chess.square_rank(square) != home_rank:
+                    score += 2
+            elif piece.piece_type == chess.ROOK:
+                file_index = chess.square_file(square)
+                if not board.pieces(chess.PAWN, color) & chess.BB_FILES[file_index]:
+                    score += 2
+            elif piece.piece_type == chess.QUEEN:
+                if chess.square_rank(square) not in {0, 7}:
+                    score += 1
+            elif piece.piece_type == chess.KING:
+                if square in {chess.C1, chess.G1, chess.C8, chess.G8}:
+                    score += 1
+
+        return score
+
+    def _king_danger_score(
+        self,
+        board: chess.Board,
+        color: chess.Color,
+    ) -> int:
+        king_square = board.king(color)
+        if king_square is None:
+            return 0
+
+        opponent = not color
+        danger = 0
+        zone = set(board.attacks(king_square))
+        zone.add(king_square)
+        for square in zone:
+            danger += len(board.attackers(opponent, square))
+
+        shield_rank = chess.square_rank(king_square) + (
+            1 if color == chess.WHITE else -1
+        )
+        if 0 <= shield_rank <= 7:
+            for file_index in range(
+                max(0, chess.square_file(king_square) - 1),
+                min(7, chess.square_file(king_square) + 1) + 1,
+            ):
+                shield_square = chess.square(file_index, shield_rank)
+                piece = board.piece_at(shield_square)
+                if piece is None or piece.color != color or piece.piece_type != chess.PAWN:
+                    danger += 1
+
+        if board.turn == opponent:
+            danger += self._count_checking_moves(board)
+
+        return danger
+
+    @staticmethod
+    def _count_checking_moves(board: chess.Board) -> int:
+        checks = 0
+        for move in board.legal_moves:
+            if board.gives_check(move):
+                checks += 1
+        return checks
+
+    @staticmethod
+    def _hanging_material_loss(
+        board: chess.Board,
+        color: chess.Color,
+    ) -> int:
+        highest = 0
+        for square, piece in board.piece_map().items():
+            if piece.color != color or piece.piece_type == chess.KING:
+                continue
+
+            attackers = board.attackers(not color, square)
+            if not attackers:
+                continue
+
+            defenders = board.attackers(color, square)
+            if defenders:
+                continue
+
+            highest = max(highest, _PIECE_VALUES.get(piece.piece_type, 0))
+
+        return highest
 
     # -- phase detection -----------------------------------------------------
 

@@ -16,6 +16,7 @@ from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
 from chesslab.progression import ProgressionSnapshot, ProgressionTrendPoint
 from chesslab.review.game_reviewer import (
+    ErrorMotif,
     GamePhase,
     GameReview,
     LessonTheme,
@@ -73,6 +74,11 @@ _CLS_LABELS: dict[MoveClassification, str] = {
     MoveClassification.BLUNDER: "Blunder",
     MoveClassification.FORCED: "Forced",
 }
+_ERROR_CLASSIFICATIONS = frozenset({
+    MoveClassification.INACCURACY,
+    MoveClassification.MISTAKE,
+    MoveClassification.BLUNDER,
+})
 _HIGHLIGHT_BG = "#2a3a4c"
 _LESSON_BG = "#23283a"
 _TREND_LINE = "#80cbc4"
@@ -87,6 +93,15 @@ _PHASE_LABELS: dict[GamePhase, str] = {
     GamePhase.OPENING: "Opening",
     GamePhase.MIDDLEGAME: "Middlegame",
     GamePhase.ENDGAME: "Endgame",
+}
+_ERROR_MOTIF_LABELS: dict[ErrorMotif, str] = {
+    ErrorMotif.MISSED_TACTIC: "Tactique ratee",
+    ErrorMotif.MATERIAL_LOSS: "Perte de materiel",
+    ErrorMotif.PAWN_STRUCTURE: "Structure de pions",
+    ErrorMotif.PIECE_ACTIVITY: "Activite des pieces",
+    ErrorMotif.KING_SAFETY: "Securite du roi",
+    ErrorMotif.ENDGAME_ERROR: "Erreur de finale",
+    ErrorMotif.UNKNOWN: "Motif inconnu",
 }
 _TRAINING_FEEDBACK_COLORS: dict[TrainingFeedbackLabel, str] = {
     TrainingFeedbackLabel.GOOD: _EVAL_POSITIVE,
@@ -613,7 +628,12 @@ class ReviewPanel(tk.Frame):
 
         cls_color = _CLS_COLORS.get(move.classification, _FG)
         cls_label = _CLS_LABELS.get(move.classification, "")
-        self._badge.config(text=cls_label, fg=cls_color)
+        if move.classification in _ERROR_CLASSIFICATIONS:
+            motif_label = _ERROR_MOTIF_LABELS.get(move.error_motif, "")
+            badge_label = f"{cls_label} · {motif_label}" if motif_label else cls_label
+        else:
+            badge_label = cls_label
+        self._badge.config(text=badge_label, fg=cls_color)
 
         self._played_label.config(
             text=f"{move.san}  ({move.eval_after})",
@@ -1388,6 +1408,8 @@ class ProgressionPanel(tk.Frame):
         self._divider()
         self._render_themes(snapshot)
         self._divider()
+        self._render_error_motifs(snapshot)
+        self._divider()
         self._render_error_phases(snapshot)
 
     def _render_empty_state(self, snapshot: ProgressionSnapshot) -> None:
@@ -1411,7 +1433,7 @@ class ProgressionPanel(tk.Frame):
             self._content,
             text=(
                 "Run more post-game reviews to track recurring lessons, error "
-                "phases, and whether your average centipawn loss is trending down."
+                "motifs, error phases, and whether your average centipawn loss is trending down."
             ),
             bg=_CARD_BG,
             fg=_FG_DIM,
@@ -1494,6 +1516,27 @@ class ProgressionPanel(tk.Frame):
             self._metric_row(
                 label=_THEME_LABELS[stat.theme],
                 value=f"{stat.count} lesson{'s' if stat.count != 1 else ''}",
+            )
+
+    def _render_error_motifs(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Error motifs")
+        if not snapshot.top_error_motifs:
+            tk.Label(
+                self._content,
+                text="No reliable error motif extracted yet in this sample.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x")
+            return
+
+        for stat in snapshot.top_error_motifs:
+            self._metric_row(
+                label=_ERROR_MOTIF_LABELS[stat.motif],
+                value=f"{stat.percentage:.1f}%  ({stat.count})",
             )
 
     def _render_error_phases(self, snapshot: ProgressionSnapshot) -> None:

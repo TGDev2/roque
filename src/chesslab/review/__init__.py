@@ -1,6 +1,7 @@
 """Post-game review with move classification."""
 
 from chesslab.review.game_reviewer import (
+    ErrorMotif,
     GamePhase,
     GameReview,
     GameReviewer,
@@ -16,6 +17,7 @@ from chesslab.review.game_reviewer import (
 )
 
 __all__ = [
+    "ErrorMotif",
     "GamePhase",
     "GameReview",
     "GameReviewer",

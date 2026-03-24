@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from chesslab.review.game_reviewer import (
+    ErrorMotif,
     GamePhase,
     GameReview,
     LessonTheme,
@@ -42,6 +43,17 @@ class TestLessonTheme:
         assert LessonTheme.PHASE_PATTERN.value == "phase_pattern"
         assert LessonTheme.TURNING_POINT.value == "turning_point"
         assert LessonTheme.ADVANTAGE_MANAGEMENT.value == "advantage_management"
+
+
+class TestErrorMotif:
+    def test_values(self) -> None:
+        assert ErrorMotif.MISSED_TACTIC.value == "tactique_ratee"
+        assert ErrorMotif.MATERIAL_LOSS.value == "perte_de_materiel"
+        assert ErrorMotif.PAWN_STRUCTURE.value == "structure_de_pions"
+        assert ErrorMotif.PIECE_ACTIVITY.value == "activite_des_pieces"
+        assert ErrorMotif.KING_SAFETY.value == "securite_du_roi"
+        assert ErrorMotif.ENDGAME_ERROR.value == "erreur_de_finale"
+        assert ErrorMotif.UNKNOWN.value == "motif_inconnu"
 
 
 class TestReviewConfig:
@@ -90,6 +102,7 @@ class TestReviewedMove:
         )
         assert move.san == "e4"
         assert move.classification == MoveClassification.EXCELLENT
+        assert move.error_motif is ErrorMotif.UNKNOWN
 
 
 class TestGameReview:

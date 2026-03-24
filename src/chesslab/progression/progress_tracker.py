@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chesslab.persistence.review_history import ReviewHistoryStorage, ReviewSummary
-from chesslab.review.game_reviewer import GamePhase, LessonTheme, MoveClassification
+from chesslab.review.game_reviewer import (
+    ErrorMotif,
+    GamePhase,
+    LessonTheme,
+    MoveClassification,
+)
 
 _TRACKED_CLASSIFICATIONS: tuple[MoveClassification, ...] = (
     MoveClassification.EXCELLENT,
@@ -14,6 +19,7 @@ _TRACKED_CLASSIFICATIONS: tuple[MoveClassification, ...] = (
     MoveClassification.MISTAKE,
     MoveClassification.BLUNDER,
 )
+_TRACKED_ERROR_MOTIFS: tuple[ErrorMotif, ...] = tuple(ErrorMotif)
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,15 @@ class ProgressionThemeStat:
 
     theme: LessonTheme
     count: int
+
+
+@dataclass(frozen=True)
+class ProgressionErrorMotifStat:
+    """Frequency of a recurring error motif."""
+
+    motif: ErrorMotif
+    count: int
+    percentage: float
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,7 @@ class ProgressionSnapshot:
     avg_cp_loss_delta: float
     sample_avg_cp_loss: float
     top_themes: tuple[ProgressionThemeStat, ...]
+    top_error_motifs: tuple[ProgressionErrorMotifStat, ...]
     error_phases: tuple[ProgressionPhaseStat, ...]
 
     @property
@@ -101,6 +117,7 @@ def build_progression_snapshot(
 
     classification_counts = {cls: 0 for cls in _TRACKED_CLASSIFICATIONS}
     theme_counts = {theme: 0 for theme in LessonTheme}
+    error_motif_counts = {motif: 0 for motif in _TRACKED_ERROR_MOTIFS}
     error_phase_counts = {phase: 0 for phase in GamePhase}
 
     for summary in summaries:
@@ -108,6 +125,8 @@ def build_progression_snapshot(
             classification_counts[cls] += summary.classification_counts.get(cls, 0)
         for theme in LessonTheme:
             theme_counts[theme] += summary.lesson_theme_counts.get(theme, 0)
+        for motif in _TRACKED_ERROR_MOTIFS:
+            error_motif_counts[motif] += summary.error_motif_counts.get(motif, 0)
         for phase in GamePhase:
             error_phase_counts[phase] += summary.error_phase_counts.get(phase, 0)
 
@@ -149,6 +168,24 @@ def build_progression_snapshot(
         if count > 0
     )[:3]
 
+    total_error_motifs = sum(error_motif_counts.values())
+    top_error_motifs = tuple(
+        ProgressionErrorMotifStat(
+            motif=motif,
+            count=count,
+            percentage=(
+                count / total_error_motifs * 100.0
+                if total_error_motifs
+                else 0.0
+            ),
+        )
+        for motif, count in sorted(
+            error_motif_counts.items(),
+            key=lambda item: (-item[1], item[0].value),
+        )
+        if count > 0
+    )
+
     total_errors = sum(error_phase_counts.values())
     error_phases = tuple(
         ProgressionPhaseStat(
@@ -173,5 +210,6 @@ def build_progression_snapshot(
         avg_cp_loss_delta=avg_cp_loss_delta,
         sample_avg_cp_loss=sample_avg_cp_loss,
         top_themes=top_themes,
+        top_error_motifs=top_error_motifs,
         error_phases=error_phases,
     )

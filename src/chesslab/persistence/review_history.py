@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from chesslab.review.game_reviewer import (
+    ErrorMotif,
     GamePhase,
     GameReview,
     LessonTheme,
@@ -26,7 +27,8 @@ from chesslab.persistence.game_storage import PersistenceError
 
 _REVIEWS_DIR = Path.home() / ".chesslab" / "reviews"
 _REVIEW_HISTORY_FILE = _REVIEWS_DIR / "history.json"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 _TRACKED_CLASSIFICATIONS: tuple[MoveClassification, ...] = (
     MoveClassification.EXCELLENT,
     MoveClassification.GOOD,
@@ -34,6 +36,7 @@ _TRACKED_CLASSIFICATIONS: tuple[MoveClassification, ...] = (
     MoveClassification.MISTAKE,
     MoveClassification.BLUNDER,
 )
+_TRACKED_ERROR_MOTIFS: tuple[ErrorMotif, ...] = tuple(ErrorMotif)
 _ERROR_CLASSIFICATIONS = frozenset({
     MoveClassification.INACCURACY,
     MoveClassification.MISTAKE,
@@ -61,6 +64,7 @@ class TrainingPositionSummary:
     phase: GamePhase
     cp_loss: int
     lesson_themes: tuple[LessonTheme, ...] = ()
+    error_motif: ErrorMotif = ErrorMotif.UNKNOWN
 
     def to_dict(self) -> dict[str, object]:
         """Serialise the training candidate to JSON-compatible data."""
@@ -76,6 +80,7 @@ class TrainingPositionSummary:
             "phase": self.phase.value,
             "cp_loss": self.cp_loss,
             "lesson_themes": [theme.value for theme in self.lesson_themes],
+            "error_motif": self.error_motif.value,
         }
 
     @classmethod
@@ -103,6 +108,11 @@ class TrainingPositionSummary:
             lesson_themes=tuple(
                 _load_enum_sequence(payload.get("lesson_themes"), LessonTheme),
             ),
+            error_motif=_load_enum_value(
+                payload.get("error_motif"),
+                ErrorMotif,
+                ErrorMotif.UNKNOWN,
+            ),
         )
 
 
@@ -117,6 +127,7 @@ class ReviewSummary:
     classification_counts: dict[MoveClassification, int]
     error_phase_counts: dict[GamePhase, int]
     lesson_theme_counts: dict[LessonTheme, int]
+    error_motif_counts: dict[ErrorMotif, int] = field(default_factory=dict)
     source_path: str | None = None
     training_positions: tuple[TrainingPositionSummary, ...] = ()
 
@@ -138,6 +149,10 @@ class ReviewSummary:
             "lesson_theme_counts": {
                 theme.value: self.lesson_theme_counts.get(theme, 0)
                 for theme in LessonTheme
+            },
+            "error_motif_counts": {
+                motif.value: self.error_motif_counts.get(motif, 0)
+                for motif in _TRACKED_ERROR_MOTIFS
             },
             "source_path": self.source_path,
             "training_positions": [
@@ -165,6 +180,10 @@ class ReviewSummary:
                 payload.get("lesson_theme_counts"),
                 tuple(LessonTheme),
             ),
+            error_motif_counts=_load_enum_counts(
+                payload.get("error_motif_counts"),
+                _TRACKED_ERROR_MOTIFS,
+            ),
             source_path=_maybe_str(payload.get("source_path")),
             training_positions=tuple(
                 TrainingPositionSummary.from_dict(item)
@@ -186,12 +205,14 @@ def build_review_summary(
     classification_counts = {cls: 0 for cls in _TRACKED_CLASSIFICATIONS}
     error_phase_counts = {phase: 0 for phase in GamePhase}
     lesson_theme_counts = {theme: 0 for theme in LessonTheme}
+    error_motif_counts = {motif: 0 for motif in _TRACKED_ERROR_MOTIFS}
 
     for move in review.moves:
         if move.classification in classification_counts:
             classification_counts[move.classification] += 1
         if move.classification in _ERROR_CLASSIFICATIONS:
             error_phase_counts[move.phase] += 1
+            error_motif_counts[move.error_motif] += 1
 
     for lesson in review.lessons:
         lesson_theme_counts[lesson.theme] += 1
@@ -210,6 +231,7 @@ def build_review_summary(
         classification_counts=classification_counts,
         error_phase_counts=error_phase_counts,
         lesson_theme_counts=lesson_theme_counts,
+        error_motif_counts=error_motif_counts,
         source_path=normalized_source,
         training_positions=_build_training_positions(review),
     )
@@ -275,7 +297,7 @@ class ReviewHistoryStorage:
             )
 
         schema_version = payload.get("schema_version")
-        if schema_version != _SCHEMA_VERSION:
+        if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
             raise PersistenceError(
                 f"Unsupported review history schema: {schema_version}",
             )
@@ -347,6 +369,7 @@ def _build_training_positions(
                 phase=move.phase,
                 cp_loss=move.cp_loss,
                 lesson_themes=themes,
+                error_motif=move.error_motif,
             ),
         ))
 

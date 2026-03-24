@@ -6,7 +6,12 @@ import pytest
 
 from chesslab.persistence.review_history import ReviewSummary
 from chesslab.progression.progress_tracker import build_progression_snapshot
-from chesslab.review.game_reviewer import GamePhase, LessonTheme, MoveClassification
+from chesslab.review.game_reviewer import (
+    ErrorMotif,
+    GamePhase,
+    LessonTheme,
+    MoveClassification,
+)
 
 
 def _summary(
@@ -17,6 +22,7 @@ def _summary(
     classification_counts: dict[MoveClassification, int] | None = None,
     error_phase_counts: dict[GamePhase, int] | None = None,
     lesson_theme_counts: dict[LessonTheme, int] | None = None,
+    error_motif_counts: dict[ErrorMotif, int] | None = None,
 ) -> ReviewSummary:
     cls_counts = {cls: 0 for cls in (
         MoveClassification.EXCELLENT,
@@ -36,6 +42,10 @@ def _summary(
     if lesson_theme_counts:
         theme_counts.update(lesson_theme_counts)
 
+    motif_counts = {motif: 0 for motif in ErrorMotif}
+    if error_motif_counts:
+        motif_counts.update(error_motif_counts)
+
     return ReviewSummary(
         game_id=game_id,
         reviewed_at=reviewed_at,
@@ -44,6 +54,7 @@ def _summary(
         classification_counts=cls_counts,
         error_phase_counts=phase_counts,
         lesson_theme_counts=theme_counts,
+        error_motif_counts=motif_counts,
     )
 
 
@@ -64,6 +75,7 @@ class TestBuildProgressionSnapshot:
                     LessonTheme.TURNING_POINT: 1,
                     LessonTheme.ADVANTAGE_MANAGEMENT: 1,
                 },
+                error_motif_counts={ErrorMotif.MISSED_TACTIC: 1},
             ),
             _summary(
                 game_id="g2",
@@ -75,6 +87,7 @@ class TestBuildProgressionSnapshot:
                 },
                 error_phase_counts={GamePhase.MIDDLEGAME: 1},
                 lesson_theme_counts={LessonTheme.PHASE_PATTERN: 2},
+                error_motif_counts={ErrorMotif.PIECE_ACTIVITY: 1},
             ),
             _summary(
                 game_id="g1",
@@ -86,6 +99,10 @@ class TestBuildProgressionSnapshot:
                 },
                 error_phase_counts={GamePhase.OPENING: 1},
                 lesson_theme_counts={LessonTheme.TURNING_POINT: 1},
+                error_motif_counts={
+                    ErrorMotif.MISSED_TACTIC: 1,
+                    ErrorMotif.KING_SAFETY: 1,
+                },
             ),
         ]
 
@@ -107,6 +124,9 @@ class TestBuildProgressionSnapshot:
         assert snapshot.top_themes[0].theme is LessonTheme.PHASE_PATTERN
         assert snapshot.top_themes[0].count == 2
         assert snapshot.top_themes[1].theme is LessonTheme.TURNING_POINT
+        assert snapshot.top_error_motifs[0].motif is ErrorMotif.MISSED_TACTIC
+        assert snapshot.top_error_motifs[0].count == 2
+        assert snapshot.top_error_motifs[0].percentage == 50.0
         assert snapshot.error_phases[0].percentage == pytest.approx(100.0 / 3.0)
         assert snapshot.error_phases[1].percentage == pytest.approx(100.0 / 3.0)
         assert snapshot.error_phases[2].percentage == pytest.approx(100.0 / 3.0)
