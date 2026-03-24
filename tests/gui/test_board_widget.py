@@ -1,6 +1,6 @@
 """Tests for the board widget pure helper functions.
 
-These tests validate coordinate mapping, FEN parsing, and flip logic
+These tests validate coordinate mapping, move-hint geometry, FEN parsing, and flip logic
 without requiring a display server.
 """
 
@@ -10,7 +10,9 @@ import pytest
 
 from chesslab.gui.board_widget import (
     coords_to_square,
+    move_hint_line_coords,
     parse_fen_placement,
+    square_center,
     square_to_coords,
 )
 
@@ -101,6 +103,54 @@ class TestCoordsToSquare:
 
         sq = coords_to_square(9999, 9999, SQUARE_SIZE, flipped=False)
         assert sq == "h1"
+
+
+# ---------------------------------------------------------------------------
+# move hint geometry
+# ---------------------------------------------------------------------------
+
+
+class TestMoveHintGeometry:
+    """Helpers for the pedagogical move hint overlay."""
+
+    def test_square_center_uses_square_middle(self) -> None:
+        center_x, center_y = square_center("e4", SQUARE_SIZE, flipped=False)
+
+        assert center_x == pytest.approx(4 * SQUARE_SIZE + SQUARE_SIZE / 2)
+        assert center_y == pytest.approx(4 * SQUARE_SIZE + SQUARE_SIZE / 2)
+
+    def test_move_hint_line_is_trimmed_inside_both_squares(self) -> None:
+        start_x, start_y, end_x, end_y = move_hint_line_coords(
+            "e2",
+            "e4",
+            SQUARE_SIZE,
+            flipped=False,
+        )
+        source_center_x, source_center_y = square_center(
+            "e2",
+            SQUARE_SIZE,
+            flipped=False,
+        )
+        target_center_x, target_center_y = square_center(
+            "e4",
+            SQUARE_SIZE,
+            flipped=False,
+        )
+
+        assert start_x == pytest.approx(source_center_x)
+        assert end_x == pytest.approx(target_center_x)
+        assert start_y < source_center_y
+        assert end_y > target_center_y
+
+    def test_move_hint_line_reorients_when_board_is_flipped(self) -> None:
+        _start_x, start_y, _end_x, end_y = move_hint_line_coords(
+            "e2",
+            "e4",
+            SQUARE_SIZE,
+            flipped=True,
+        )
+
+        assert start_y < end_y
 
 
 # ---------------------------------------------------------------------------

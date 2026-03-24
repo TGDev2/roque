@@ -107,6 +107,12 @@ _ACCENT_HOVER = "#90caf9"
 _ACCENT_DARK = "#3d7ab8"
 _ERROR = "#ef5350"
 _SUCCESS = "#66bb6a"
+_COACH_MOVE_HINT = "#3b82f6"
+_REVIEW_MOVE_HINTS: dict[MoveClassification, str] = {
+    MoveClassification.INACCURACY: "#ffee58",
+    MoveClassification.MISTAKE: "#ffb74d",
+    MoveClassification.BLUNDER: "#ef5350",
+}
 
 # Button colours.
 _BTN_BG = "#2a2a3c"
@@ -1869,6 +1875,46 @@ class ChessGui:
             except queue.Empty:
                 break
 
+    @staticmethod
+    def _best_move_squares(best_move_uci: str | None) -> tuple[str, str] | None:
+        """Return source and destination squares for a valid UCI move."""
+        if best_move_uci is None or len(best_move_uci) < 4:
+            return None
+
+        from_sq = best_move_uci[:2]
+        to_sq = best_move_uci[2:4]
+        try:
+            chess.parse_square(from_sq)
+            chess.parse_square(to_sq)
+        except ValueError:
+            return None
+        return from_sq, to_sq
+
+    def _set_board_move_hint(self, best_move_uci: str | None, *, color: str) -> None:
+        """Render or clear a move hint overlay on the board."""
+        if self._board_widget is None:
+            return
+
+        squares = self._best_move_squares(best_move_uci)
+        if squares is None:
+            self._board_widget.clear_highlights()
+            return
+
+        self._board_widget.set_move_hint(*squares, color=color)
+
+    def _update_review_move_hint(self, move: ReviewedMove | None) -> None:
+        """Show the review hint only for pedagogical error classes."""
+        if move is None:
+            self._set_board_move_hint(None, color=_COACH_MOVE_HINT)
+            return
+
+        colour = _REVIEW_MOVE_HINTS.get(move.classification)
+        if colour is None or not move.best_move_uci or move.best_move_uci == move.uci:
+            self._set_board_move_hint(None, color=_COACH_MOVE_HINT)
+            return
+
+        self._set_board_move_hint(move.best_move_uci, color=colour)
+
     def _clear_coaching_outputs(self) -> None:
         """Clear engine-driven UI state and stop any in-flight analysis."""
         if self._coach is not None:
@@ -2305,6 +2351,7 @@ class ChessGui:
 
             if self._coach.is_player_turn:
                 self._coach.submit_player_move(san)
+                self._clear_coaching_outputs()
                 self._refresh_after_move()
                 if self._coach.is_game_over:
                     self._handle_finished_manual_game()
@@ -2410,13 +2457,8 @@ class ChessGui:
         if self._suggestions_panel is not None:
             self._suggestions_panel.update_suggestions(update.variations)
 
-        if update.best_move_uci:
-            self._best_move_uci = update.best_move_uci
-            if self._board_widget is not None:
-                # Show arrow from source to destination.
-                from_sq = update.best_move_uci[:2]
-                to_sq = update.best_move_uci[2:4]
-                self._board_widget.highlight_squares([from_sq, to_sq])
+        self._best_move_uci = update.best_move_uci or None
+        self._set_board_move_hint(self._best_move_uci, color=_COACH_MOVE_HINT)
 
     # -- Status management ---------------------------------------------------
 
@@ -3533,7 +3575,6 @@ class ChessGui:
         # Update board.
         fen = self._review_positions[ply]
         self._board_widget.set_position(fen)
-        self._board_widget.clear_highlights()
 
         # Show last move highlight.
         if ply > 0:
@@ -3541,14 +3582,10 @@ class ChessGui:
             from_sq = move.uci[:2]
             to_sq = move.uci[2:4]
             self._board_widget.set_last_move(from_sq, to_sq)
-
-            # Show best move arrow if different from played move.
-            if move.best_move_uci and move.best_move_uci != move.uci:
-                best_from = move.best_move_uci[:2]
-                best_to = move.best_move_uci[2:4]
-                self._board_widget.highlight_squares([best_from, best_to])
+            self._update_review_move_hint(move)
         else:
             self._board_widget.clear_last_move()
+            self._update_review_move_hint(None)
 
         # Update review panel.
         if ply > 0:

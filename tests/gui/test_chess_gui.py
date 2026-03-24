@@ -12,8 +12,8 @@ import chess
 import pytest
 
 from chesslab.capture.screen_capture import CapturePermissionError
-from chesslab.analysis import AnalysisConfig
-from chesslab.coach.game_coach import PlayerColor
+from chesslab.analysis import AnalysisConfig, ContinuousUpdate
+from chesslab.coach.game_coach import ContinuousAdvice, PlayerColor
 from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
 from chesslab.review.game_reviewer import (
@@ -154,6 +154,46 @@ def _make_review_with_lesson() -> GameReview:
             ),
         ),
         total_elapsed_ms=250.0,
+    )
+
+
+def _make_review_move(
+    classification: MoveClassification,
+    *,
+    best_move_uci: str = "d2d4",
+    played_uci: str = "e2e4",
+) -> ReviewedMove:
+    return ReviewedMove(
+        ply=0,
+        san="e4",
+        uci=played_uci,
+        fen_before="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        classification=classification,
+        eval_before=Evaluation(centipawns=150, mate_in=None),
+        eval_after=Evaluation(centipawns=-20, mate_in=None),
+        best_move_san="d4" if best_move_uci else "",
+        best_move_uci=best_move_uci,
+        best_eval=Evaluation(centipawns=150, mate_in=None),
+        cp_loss=130,
+        best_pv_san=("d4", "d5") if best_move_uci else (),
+        phase=GamePhase.OPENING,
+        is_white=True,
+        is_forced=classification is MoveClassification.FORCED,
+    )
+
+
+def _make_single_move_review(move: ReviewedMove) -> GameReview:
+    return GameReview(
+        moves=(move,),
+        phase_summaries=(),
+        white_classification_counts={move.classification: 1},
+        black_classification_counts={},
+        white_avg_cp_loss=float(move.cp_loss),
+        black_avg_cp_loss=0.0,
+        critical_moments=(0,),
+        lessons=(),
+        total_elapsed_ms=100.0,
     )
 
 
@@ -342,20 +382,159 @@ class TestObserveLiveHelpers:
         gui._show_progression_dialog.assert_called_once()
 
 
+class TestBoardMoveHints:
+    def test_apply_advice_shows_manual_coach_hint(self) -> None:
+        gui = ChessGui()
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._suggestions_panel = MagicMock()
+
+        advice = ContinuousAdvice(
+            opponent_move_san="e4",
+            current_fen=chess.Board().fen(),
+            update=ContinuousUpdate(
+                fen=chess.Board().fen(),
+                variations=(),
+                evaluation=Evaluation(centipawns=35, mate_in=None),
+                best_move_uci="e2e4",
+                best_move_san="e4",
+                depth_reached=14,
+                elapsed_ms=120.0,
+            ),
+            move_number=1,
+        )
+
+        gui._apply_advice(advice)
+
+        assert gui._best_move_uci == "e2e4"
+        gui._board_widget.set_move_hint.assert_called_once_with(
+            "e2",
+            "e4",
+            color="#3b82f6",
+        )
+
+    def test_apply_advice_clears_hint_when_no_best_move_is_available(self) -> None:
+        gui = ChessGui()
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._suggestions_panel = MagicMock()
+        gui._best_move_uci = "e2e4"
+
+        advice = ContinuousAdvice(
+            opponent_move_san="e4",
+            current_fen=chess.Board().fen(),
+            update=ContinuousUpdate(
+                fen=chess.Board().fen(),
+                variations=(),
+                evaluation=Evaluation(centipawns=0, mate_in=None),
+                best_move_uci="",
+                best_move_san="",
+                depth_reached=14,
+                elapsed_ms=120.0,
+            ),
+            move_number=1,
+        )
+
+        gui._apply_advice(advice)
+
+        assert gui._best_move_uci is None
+        gui._board_widget.clear_highlights.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("classification", "colour"),
+        [
+            (MoveClassification.INACCURACY, "#ffee58"),
+            (MoveClassification.MISTAKE, "#ffb74d"),
+            (MoveClassification.BLUNDER, "#ef5350"),
+        ],
+    )
+    def test_review_navigation_shows_hint_for_pedagogical_errors(
+        self,
+        classification: MoveClassification,
+        colour: str,
+    ) -> None:
+        gui = ChessGui()
+        gui._in_review_mode = True
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._review_panel = MagicMock()
+        gui._review_nav = MagicMock()
+        gui._history_panel = MagicMock()
+        gui._set_status = MagicMock()
+
+        move = _make_review_move(classification)
+        gui._game_review = _make_single_move_review(move)
+        gui._review_positions = [move.fen_before, move.fen_after]
+
+        gui._review_navigate_to(1)
+
+        gui._board_widget.set_move_hint.assert_called_once_with(
+            "d2",
+            "d4",
+            color=colour,
+        )
+
+    @pytest.mark.parametrize(
+        "classification",
+        [
+            MoveClassification.EXCELLENT,
+            MoveClassification.GOOD,
+            MoveClassification.FORCED,
+        ],
+    )
+    def test_review_navigation_hides_hint_for_non_error_moves(
+        self,
+        classification: MoveClassification,
+    ) -> None:
+        gui = ChessGui()
+        gui._in_review_mode = True
+        gui._board_widget = MagicMock()
+        gui._eval_panel = MagicMock()
+        gui._review_panel = MagicMock()
+        gui._review_nav = MagicMock()
+        gui._history_panel = MagicMock()
+        gui._set_status = MagicMock()
+
+        move = _make_review_move(classification)
+        gui._game_review = _make_single_move_review(move)
+        gui._review_positions = [move.fen_before, move.fen_after]
+
+        gui._review_navigate_to(1)
+
+        gui._board_widget.clear_highlights.assert_called_once()
+        gui._board_widget.set_move_hint.assert_not_called()
+
+
 class TestManualCoachReviewOffer:
     def test_submit_san_offers_review_when_player_move_finishes_game(self) -> None:
         gui = ChessGui()
         gui._coach = MagicMock()
         gui._coach.is_player_turn = True
         gui._coach.is_game_over = True
+        gui._clear_coaching_outputs = MagicMock()
         gui._refresh_after_move = MagicMock()
         gui._handle_finished_manual_game = MagicMock()
 
         gui._submit_san("Qxf7#")
 
         gui._coach.submit_player_move.assert_called_once_with("Qxf7#")
+        gui._clear_coaching_outputs.assert_called_once()
         gui._handle_finished_manual_game.assert_called_once()
         gui._coach.submit_opponent_move_continuous.assert_not_called()
+
+    def test_submit_san_clears_stale_coaching_outputs_after_player_move(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._coach.is_player_turn = True
+        gui._coach.is_game_over = False
+        gui._refresh_after_move = MagicMock()
+        gui._clear_coaching_outputs = MagicMock()
+
+        gui._submit_san("Nf3")
+
+        gui._coach.submit_player_move.assert_called_once_with("Nf3")
+        gui._clear_coaching_outputs.assert_called_once()
+        gui._refresh_after_move.assert_called_once()
 
     def test_submit_san_skips_loading_state_when_opponent_move_finishes_game(self) -> None:
         gui = ChessGui()

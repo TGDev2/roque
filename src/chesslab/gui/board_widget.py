@@ -10,7 +10,9 @@ The board can be flipped for playing as Black via :meth:`set_flipped`.
 from __future__ import annotations
 
 import logging
+import math
 import tkinter as tk
+from dataclasses import dataclass
 from typing import Callable, ClassVar
 
 import chess
@@ -47,6 +49,7 @@ _LAST_MOVE_LIGHT = "#cdd26a"
 _LAST_MOVE_DARK = "#a9a238"
 _HIGHLIGHT_ARROW = "#3b82f6"
 _CHECK_COLOUR = "#e74c3c"
+_MOVE_HINT_STIPPLE = "gray50"
 
 _PROMOTION_BG = "#1a1a2e"
 _PROMOTION_FG = "#e8e8e8"
@@ -63,6 +66,15 @@ _COORD_LIGHT_FG = "#a07850"
 _COORD_DARK_FG = "#d4bc98"
 
 MoveCallback = Callable[[str, str], None]
+
+
+@dataclass(frozen=True)
+class BoardMoveHint:
+    """Visual hint rendered on top of the board."""
+
+    from_square: str
+    to_square: str
+    colour: str = _HIGHLIGHT_ARROW
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +97,17 @@ def square_to_coords(
         col = file_idx
         row = 7 - rank_idx
     return col * square_size, row * square_size
+
+
+def square_center(
+    square_name: str,
+    square_size: int,
+    flipped: bool,
+) -> tuple[float, float]:
+    """Return the pixel centre of *square_name* on the canvas."""
+    x, y = square_to_coords(square_name, square_size, flipped)
+    half = square_size / 2
+    return x + half, y + half
 
 
 def coords_to_square(
@@ -122,6 +145,34 @@ def parse_fen_placement(placement: str) -> dict[str, str]:
                 pieces[sq] = ch
                 file_idx += 1
     return pieces
+
+
+def move_hint_line_coords(
+    from_square: str,
+    to_square: str,
+    square_size: int,
+    flipped: bool,
+    *,
+    inset_ratio: float = 0.22,
+) -> tuple[float, float, float, float]:
+    """Return trimmed line endpoints for a move hint arrow."""
+    start_x, start_y = square_center(from_square, square_size, flipped)
+    end_x, end_y = square_center(to_square, square_size, flipped)
+    dx = end_x - start_x
+    dy = end_y - start_y
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return start_x, start_y, end_x, end_y
+
+    inset = square_size * inset_ratio
+    unit_x = dx / length
+    unit_y = dy / length
+    return (
+        start_x + unit_x * inset,
+        start_y + unit_y * inset,
+        end_x - unit_x * inset,
+        end_y - unit_y * inset,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +224,9 @@ class BoardWidget(tk.Canvas):
         self._interactive = True
         self._selected_square: str | None = None
         self._last_move: tuple[str, str] | None = None
-        self._highlighted_squares: list[str] = []
+        self._highlighted_squares: tuple[str, ...] = ()
+        self._highlight_colour = _HIGHLIGHT_ARROW
+        self._move_hint: BoardMoveHint | None = None
 
         self.bind("<Button-1>", self._on_click)
         self._draw()
@@ -210,13 +263,35 @@ class BoardWidget(tk.Canvas):
         self._draw()
 
     def highlight_squares(self, squares: list[str]) -> None:
-        """Highlight a list of squares (e.g. for best move arrow)."""
-        self._highlighted_squares = squares
+        """Highlight squares and draw an arrow when the first two define a move."""
+        unique_squares = tuple(dict.fromkeys(squares))
+        self._highlighted_squares = unique_squares
+        if len(unique_squares) >= 2:
+            self._move_hint = BoardMoveHint(
+                from_square=unique_squares[0],
+                to_square=unique_squares[1],
+                colour=self._highlight_colour,
+            )
+        else:
+            self._move_hint = None
+        self._draw()
+
+    def set_move_hint(self, from_sq: str, to_sq: str, *, color: str) -> None:
+        """Highlight a suggested move with coloured squares and an arrow."""
+        self._highlight_colour = color
+        self._highlighted_squares = (from_sq, to_sq)
+        self._move_hint = BoardMoveHint(
+            from_square=from_sq,
+            to_square=to_sq,
+            colour=color,
+        )
         self._draw()
 
     def clear_highlights(self) -> None:
         """Redraw the board without extra highlights."""
-        self._highlighted_squares = []
+        self._highlighted_squares = ()
+        self._highlight_colour = _HIGHLIGHT_ARROW
+        self._move_hint = None
         self._draw()
 
     # -- Drawing -------------------------------------------------------------
@@ -283,6 +358,18 @@ class BoardWidget(tk.Canvas):
                     )
 
         # Draw legal move indicators (dots and capture rings).
+        for sq_name in self._highlighted_squares:
+            x, y = square_to_coords(sq_name, sz, self._flipped)
+            margin = max(2, sz // 14)
+            self.create_rectangle(
+                x + margin, y + margin,
+                x + sz - margin, y + sz - margin,
+                fill=self._highlight_colour,
+                outline="",
+                stipple=_MOVE_HINT_STIPPLE,
+            )
+
+        # Draw legal move indicators (dots and capture rings).
         for sq_name in legal_dests:
             x, y = square_to_coords(sq_name, sz, self._flipped)
             cx, cy = x + sz // 2, y + sz // 2
@@ -341,16 +428,20 @@ class BoardWidget(tk.Canvas):
                     )
 
         # Draw best-move arrow highlight.
-        if len(self._highlighted_squares) >= 2:
-            from_sq = self._highlighted_squares[0]
-            to_sq = self._highlighted_squares[1]
-            fx, fy = square_to_coords(from_sq, sz, self._flipped)
-            tx, ty = square_to_coords(to_sq, sz, self._flipped)
-            half = sz // 2
+        if self._move_hint is not None:
+            start_x, start_y, end_x, end_y = move_hint_line_coords(
+                self._move_hint.from_square,
+                self._move_hint.to_square,
+                sz,
+                self._flipped,
+            )
             self.create_line(
-                fx + half, fy + half, tx + half, ty + half,
-                fill=_HIGHLIGHT_ARROW, width=max(3, sz // 12),
+                start_x, start_y, end_x, end_y,
+                fill=self._move_hint.colour,
+                width=max(4, sz // 10),
                 arrow="last", arrowshape=(sz // 4, sz // 3, sz // 8),
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
             )
 
         # Coordinate labels.
