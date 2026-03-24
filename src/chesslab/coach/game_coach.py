@@ -166,6 +166,9 @@ class GameCoach:
             else chess.WHITE
         )
         self._current_handle: ContinuousAnalysisHandle | None = None
+        self._manual_result: str | None = None
+        self._manual_winner: chess.Color | None = None
+        self._manual_termination: str | None = None
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -374,17 +377,48 @@ class GameCoach:
         self._current_handle = handle
         return handle
 
+    def record_resignation(self, resigning_color: PlayerColor) -> None:
+        """End the current game by resignation for the selected side."""
+        self._check_game_not_over()
+        self.stop_analysis()
+
+        winner = (
+            chess.BLACK
+            if resigning_color == PlayerColor.WHITE
+            else chess.WHITE
+        )
+        winner_label = "White" if winner == chess.WHITE else "Black"
+
+        self._manual_result = "1-0" if winner == chess.WHITE else "0-1"
+        self._manual_winner = winner
+        self._manual_termination = f"{winner_label} won by resignation"
+        logger.info(
+            "Game ended by resignation: %s resigned (%s)",
+            resigning_color.value,
+            self._manual_result,
+        )
+
     def undo_move(self) -> str | None:
         """Undo the last move on the board.
 
-        Stops any running analysis and pops the most recent move.
+        Stops any running analysis and pops the most recent move.  If the
+        game was ended manually by resignation, clears that terminal state
+        first and leaves the board position unchanged.
 
         Returns
         -------
         str or None
-            The SAN of the undone move, or ``None`` if no moves to undo.
+            The SAN of the undone move, ``""`` if a manual resignation was
+            cleared, or ``None`` if no moves to undo.
         """
         self.stop_analysis()
+
+        if self._manual_result is not None:
+            self._manual_result = None
+            self._manual_winner = None
+            self._manual_termination = None
+            logger.info("Undo manual game termination.")
+            return ""
 
         if not self._board.move_stack:
             return None
@@ -418,12 +452,34 @@ class GameCoach:
     @property
     def is_game_over(self) -> bool:
         """``True`` if the game has ended (checkmate, stalemate, etc.)."""
-        return self._board.is_game_over()
+        return self._manual_result is not None or self._board.is_game_over()
 
     @property
     def is_player_turn(self) -> bool:
         """``True`` if it is currently the player's turn to move."""
         return self._board.turn != self._opponent_chess_color
+
+    @property
+    def game_result(self) -> str:
+        """The current game result, including manual resignations."""
+        if self._manual_result is not None:
+            return self._manual_result
+        if self._board.is_game_over():
+            return self._board.result()
+        return "*"
+
+    @property
+    def game_winner(self) -> chess.Color | None:
+        """The winning side, or ``None`` for draws / unfinished games."""
+        if self._manual_result is not None:
+            return self._manual_winner
+        outcome = self._board.outcome()
+        return outcome.winner if outcome is not None else None
+
+    @property
+    def game_termination(self) -> str | None:
+        """Human-readable termination text for manually-ended games."""
+        return self._manual_termination
 
     @property
     def board(self) -> chess.Board:
@@ -438,6 +494,9 @@ class GameCoach:
         """
         self.stop_analysis()
         self._board = board.copy()
+        self._manual_result = None
+        self._manual_winner = None
+        self._manual_termination = None
         logger.info(
             "Board loaded: %s (%d moves)",
             self._board.fen(),
@@ -458,6 +517,8 @@ class GameCoach:
 
     def _check_game_not_over(self) -> None:
         """Raise if the game has ended."""
+        if self._manual_result is not None:
+            raise GameOverError("Game is over: resignation.")
         if self._board.is_game_over():
             outcome = self._board.outcome()
             reason = outcome.termination.name if outcome else "unknown"

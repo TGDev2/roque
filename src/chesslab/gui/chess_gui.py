@@ -279,6 +279,15 @@ class _BatchReviewFinishedEvent:
     result: BatchReviewItemResult
 
 
+@dataclass(frozen=True)
+class _ScrollableDialogLayout:
+    dialog: tk.Toplevel
+    canvas: tk.Canvas
+    scrollbar: tk.Scrollbar
+    container: tk.Frame
+    window_id: int
+
+
 # ---------------------------------------------------------------------------
 # Main GUI class
 # ---------------------------------------------------------------------------
@@ -401,11 +410,14 @@ class ChessGui:
 
         # Frame refs for layout management.
         self._btn_frame: tk.Frame | None = None
+        self._resign_frame: tk.Frame | None = None
         self._new_game_btn: tk.Button | None = None
         self._pgn_frame: tk.Frame | None = None
         self._progression_btn: tk.Button | None = None
         self._entry_frame: tk.Frame | None = None
         self._submit_btn: tk.Button | None = None
+        self._resign_white_btn: tk.Button | None = None
+        self._resign_black_btn: tk.Button | None = None
         self._progression_dialog: tk.Toplevel | None = None
         self._progression_limit_var: tk.IntVar | None = None
 
@@ -476,21 +488,100 @@ class ChessGui:
         coach.start()
         return coach
 
+    def _create_scrollable_dialog(
+        self,
+        parent: tk.Widget,
+        *,
+        title: str,
+        padx: int = 24,
+        pady: int = 20,
+    ) -> _ScrollableDialogLayout:
+        """Create a modal dialog with vertical scrolling for tall content."""
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        dialog.configure(bg=_BG)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+
+        outer = tk.Frame(dialog, bg=_BG)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(
+            outer,
+            bg=_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        scrollbar = tk.Scrollbar(
+            outer,
+            orient="vertical",
+            command=canvas.yview,
+            highlightthickness=0,
+            bd=0,
+            troughcolor=_BG_SECONDARY,
+            activebackground=_BTN_HOVER,
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        container = tk.Frame(canvas, bg=_BG, padx=padx, pady=pady)
+        window_id = canvas.create_window((0, 0), window=container, anchor="nw")
+
+        container.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window_id, width=event.width),
+        )
+
+        return _ScrollableDialogLayout(
+            dialog=dialog,
+            canvas=canvas,
+            scrollbar=scrollbar,
+            container=container,
+            window_id=window_id,
+        )
+
+    def _finalize_scrollable_dialog(
+        self,
+        parent: tk.Widget,
+        layout: _ScrollableDialogLayout,
+    ) -> None:
+        """Fit a scrollable dialog to the screen and center it."""
+        dialog = layout.dialog
+        dialog.update_idletasks()
+
+        max_width = max(420, dialog.winfo_screenwidth() - 80)
+        max_height = max(320, dialog.winfo_screenheight() - 80)
+        width = min(dialog.winfo_reqwidth(), max_width)
+        height = min(dialog.winfo_reqheight(), max_height)
+
+        dialog.maxsize(max_width, max_height)
+
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        dialog.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        layout.canvas.configure(scrollregion=layout.canvas.bbox("all"))
+        layout.canvas.yview_moveto(0.0)
+
     # -- Startup launcher ----------------------------------------------------
 
     def _show_startup_dialog(self, parent: tk.Tk) -> StartupJourneyMode:
         """Show a startup launcher for the main product journeys."""
         result: list[StartupJourneyMode] = [StartupJourneyMode.MANUAL_COACH]
 
-        dialog = tk.Toplevel(parent)
-        dialog.title("ChessLab")
-        dialog.configure(bg=_BG)
-        dialog.transient(parent)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        container = tk.Frame(dialog, bg=_BG)
-        container.pack(fill="both", expand=True, padx=20, pady=18)
+        layout = self._create_scrollable_dialog(
+            parent,
+            title="ChessLab",
+            padx=20,
+            pady=18,
+        )
+        dialog = layout.dialog
+        container = layout.container
 
         tk.Label(
             container,
@@ -660,10 +751,7 @@ class ChessGui:
             pady=5,
         ).pack(side="right")
 
-        dialog.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - dialog.winfo_height()) // 2
-        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self._finalize_scrollable_dialog(parent, layout)
 
         parent.wait_window(dialog)
         return result[0]
@@ -943,6 +1031,37 @@ class ChessGui:
         )
         self._observe_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
+        self._resign_frame = tk.Frame(panel_frame, bg=_BG)
+        self._resign_frame.pack(fill="x", pady=(0, 4))
+
+        self._resign_white_btn = _styled_button(
+            self._resign_frame,
+            text="White resigns",
+            command=lambda: self._on_resign(PlayerColor.WHITE),
+            bg=_BTN_WHITE_BG,
+            fg=_BTN_WHITE_FG,
+            hover_bg=_BTN_WHITE_HOVER,
+            active_bg="#f5ede1",
+            font=("sans-serif", 9, "bold"),
+        )
+        self._resign_white_btn.pack(
+            side="left", fill="x", expand=True, padx=(0, 3),
+        )
+
+        self._resign_black_btn = _styled_button(
+            self._resign_frame,
+            text="Black resigns",
+            command=lambda: self._on_resign(PlayerColor.BLACK),
+            bg=_BTN_BLACK_BG,
+            fg=_BTN_BLACK_FG,
+            hover_bg=_BTN_BLACK_HOVER,
+            active_bg="#4a4a5c",
+            font=("sans-serif", 9, "bold"),
+        )
+        self._resign_black_btn.pack(
+            side="left", fill="x", expand=True, padx=(3, 0),
+        )
+
         # New game button.
         self._new_game_btn = _styled_button(
             panel_frame,
@@ -1034,7 +1153,7 @@ class ChessGui:
         # Track play-mode widgets for hide/show.
         self._play_mode_widgets = [
             self._eval_panel, self._observe_panel, self._suggestions_panel,
-            self._btn_frame,
+            self._btn_frame, self._resign_frame,
             self._new_game_btn, self._pgn_frame,
         ]
         self._review_mode_widgets = [
@@ -1138,15 +1257,14 @@ class ChessGui:
             setup_options = ()
             assistant_error = f"Setup catalog unavailable: {exc}"
 
-        dialog = tk.Toplevel(parent)
-        dialog.title("Observe Live")
-        dialog.configure(bg=_BG)
-        dialog.transient(parent)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        container = tk.Frame(dialog, bg=_BG)
-        container.pack(fill="both", expand=True, padx=24, pady=20)
+        layout = self._create_scrollable_dialog(
+            parent,
+            title="Observe Live",
+            padx=24,
+            pady=20,
+        )
+        dialog = layout.dialog
+        container = layout.container
 
         tk.Label(
             container, text="Observe Live", bg=_BG, fg=_FG,
@@ -1701,11 +1819,7 @@ class ChessGui:
             lambda *_args: refresh_preflight_state(),
         )
 
-        # Center dialog.
-        dialog.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - dialog.winfo_width()) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - dialog.winfo_height()) // 2
-        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self._finalize_scrollable_dialog(parent, layout)
 
         parent.wait_window(dialog)
         return result[0]
@@ -2122,6 +2236,8 @@ class ChessGui:
                     )
                 else:
                     self._btn_frame.pack(fill="x", pady=(0, 4))
+            if self._resign_frame is not None:
+                self._resign_frame.pack_forget()
             if self._new_game_btn is not None:
                 self._new_game_btn.pack_forget()
             if self._pgn_frame is not None:
@@ -2167,8 +2283,17 @@ class ChessGui:
                 self._btn_frame.pack(fill="x", pady=(0, 4), after=self._history_panel)
             else:
                 self._btn_frame.pack(fill="x", pady=(0, 4))
-        if self._new_game_btn is not None:
+        if self._resign_frame is not None:
             if self._btn_frame is not None:
+                self._resign_frame.pack(fill="x", pady=(0, 4), after=self._btn_frame)
+            else:
+                self._resign_frame.pack(fill="x", pady=(0, 4))
+        if self._new_game_btn is not None:
+            if self._resign_frame is not None:
+                self._new_game_btn.pack(
+                    fill="x", pady=(0, 4), after=self._resign_frame,
+                )
+            elif self._btn_frame is not None:
                 self._new_game_btn.pack(fill="x", pady=(0, 4), after=self._btn_frame)
             else:
                 self._new_game_btn.pack(fill="x", pady=(0, 4))
@@ -2448,6 +2573,35 @@ class ChessGui:
         self._best_move_uci = None
         self._submit_san(san)
 
+    def _on_resign(self, resigning_color: PlayerColor) -> None:
+        """End the current manual game by resignation for the selected side."""
+        if self._observing:
+            self._set_status(
+                "Observe Live is passive. Exit to Manual Coach before ending the game.",
+                error=True,
+            )
+            return
+        assert self._coach is not None
+
+        color_label = "White" if resigning_color == PlayerColor.WHITE else "Black"
+        confirmed = messagebox.askyesno(
+            "Confirm resignation",
+            f"End this Manual Coach game with {color_label} resigning?",
+            parent=self._root,
+        )
+        if not confirmed:
+            return
+
+        try:
+            self._coach.record_resignation(resigning_color)
+        except GameOverError as exc:
+            self._set_status(str(exc), error=True)
+            return
+
+        self._clear_coaching_outputs()
+        self._update_turn_status()
+        self._handle_finished_manual_game()
+
     def _on_undo(self) -> None:
         """Undo the last move."""
         if self._observing:
@@ -2479,7 +2633,7 @@ class ChessGui:
         self._suggestions_panel.update_suggestions(())
 
         self._update_turn_status()
-        logger.info("Undo: %s", san)
+        logger.info("Undo: %s", san or "manual game termination")
 
     def _submit_san(self, san: str, *, passive: bool = False) -> None:
         """Submit a SAN move, routing to opponent or player method."""
@@ -2644,10 +2798,20 @@ class ChessGui:
 
         if self._coach.is_game_over:
             self._auto_save()
-            outcome = chess.Board(self._coach.current_fen).outcome()
-            if outcome and outcome.winner is not None:
-                winner = "White" if outcome.winner else "Black"
-                self._set_status(f"Game over \u2014 {winner} wins!", game_over=True)
+            winner = self._coach.game_winner
+            termination = self._coach.game_termination
+            if winner is not None:
+                winner_label = "White" if winner == chess.WHITE else "Black"
+                if termination is not None and "resignation" in termination.lower():
+                    self._set_status(
+                        f"Game over \u2014 {winner_label} wins by resignation!",
+                        game_over=True,
+                    )
+                else:
+                    self._set_status(
+                        f"Game over \u2014 {winner_label} wins!",
+                        game_over=True,
+                    )
             else:
                 self._set_status("Game over \u2014 Draw!", game_over=True)
             return
@@ -2668,12 +2832,13 @@ class ChessGui:
             return
 
         board = self._coach.board
+        result_text = self._current_game_result_text()
         if not board.move_stack:
             return
 
         self._clear_coaching_outputs()
         self._auto_save()
-        self._propose_manual_review(board)
+        self._propose_manual_review(board, result_text=result_text)
 
     def _set_status(
         self,
@@ -2801,22 +2966,30 @@ class ChessGui:
             self._refresh_progression_panel()
         return True
 
+    def _current_game_result_text(self) -> str:
+        """Return a user-facing summary of the current manual game result."""
+        if self._coach is None:
+            return "incomplete"
+
+        result = self._coach.game_result
+        termination = self._coach.game_termination
+        if termination is not None:
+            return f"{result} ({termination})"
+        return result if result != "*" else "incomplete"
+
     def _build_headers(self) -> dict[str, str]:
         """Build PGN headers from the current game state."""
         assert self._coach is not None
         player_color = self._coach._config.player_color
 
-        outcome = self._coach.board.outcome()
-        if outcome is not None:
-            result = self._coach.board.result()
-        else:
-            result = "*"
-
-        return build_headers(
+        headers = build_headers(
             player_color=player_color,
             engine_elo=self._engine_elo,
-            result=result,
+            result=self._coach.game_result,
         )
+        if self._coach.game_termination is not None:
+            headers["Termination"] = self._coach.game_termination
+        return headers
 
     def _build_observe_headers(self, board: chess.Board) -> dict[str, str]:
         """Build PGN headers for a game observed via Observe Live."""
@@ -4865,7 +5038,12 @@ class ChessGui:
         except tk.TclError:
             pass
 
-    def _propose_manual_review(self, board: chess.Board) -> None:
+    def _propose_manual_review(
+        self,
+        board: chess.Board,
+        *,
+        result_text: str | None = None,
+    ) -> None:
         """Offer a post-game review for a finished Manual Coach game."""
         if not board.move_stack or self._root is None:
             return
@@ -4874,7 +5052,11 @@ class ChessGui:
         self._close_post_game_review_dialog()
 
         move_count = len(board.move_stack)
-        result_text = board.result() if board.outcome() is not None else "incomplete"
+        summary_text = (
+            result_text
+            if result_text is not None
+            else (board.result() if board.outcome() is not None else "incomplete")
+        )
 
         dialog = tk.Toplevel(self._root)
         dialog.title("Game finished")
@@ -4898,7 +5080,7 @@ class ChessGui:
         tk.Label(
             container,
             text=(
-                f"{move_count} moves saved \u2014 {result_text}\n"
+                f"{move_count} moves saved \u2014 {summary_text}\n"
                 "Launch a full review now, start a new game, or head back to the launcher."
             ),
             bg=_BG,

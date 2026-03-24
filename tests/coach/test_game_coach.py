@@ -464,6 +464,23 @@ class TestGameOver:
         coach, _ = _make_coach_with_mock()
         assert not coach.is_game_over
 
+    def test_resignation_marks_game_over_with_result(self) -> None:
+        coach, _ = _make_coach_with_mock()
+
+        coach.record_resignation(PlayerColor.BLACK)
+
+        assert coach.is_game_over
+        assert coach.game_result == "1-0"
+        assert coach.game_winner == chess.WHITE
+        assert coach.game_termination == "White won by resignation"
+
+    def test_move_after_resignation_raises(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        coach.record_resignation(PlayerColor.WHITE)
+
+        with pytest.raises(GameOverError, match="Game is over: resignation"):
+            coach.record_move("e4")
+
 
 # ---------------------------------------------------------------------------
 # AC: Board state tracking
@@ -832,3 +849,16 @@ class TestLoadBoard:
 
         # Coach board should NOT have d5.
         assert coach.move_history == ("d4",)
+
+    def test_load_board_clears_manual_resignation_state(self) -> None:
+        coach, _ = _make_coach_with_mock()
+        coach.record_resignation(PlayerColor.BLACK)
+
+        new_board = chess.Board()
+        new_board.push_san("e4")
+
+        coach.load_board(new_board)
+
+        assert not coach.is_game_over
+        assert coach.game_result == "*"
+        assert coach.game_termination is None

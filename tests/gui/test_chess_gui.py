@@ -779,6 +779,8 @@ class TestManualCoachReviewOffer:
         gui = ChessGui()
         gui._coach = MagicMock()
         gui._coach.board = _make_checkmate_board()
+        gui._coach.game_result = "0-1"
+        gui._coach.game_termination = None
         gui._clear_coaching_outputs = MagicMock()
         gui._auto_save = MagicMock()
         gui._propose_manual_review = MagicMock()
@@ -788,8 +790,58 @@ class TestManualCoachReviewOffer:
         gui._clear_coaching_outputs.assert_called_once()
         gui._auto_save.assert_called_once()
         proposed_board = gui._propose_manual_review.call_args.args[0]
+        assert gui._propose_manual_review.call_args.kwargs["result_text"] == "0-1"
         assert proposed_board.result() == "0-1"
         assert len(proposed_board.move_stack) == 4
+
+    @patch("chesslab.gui.chess_gui.messagebox.askyesno", return_value=True)
+    def test_resign_records_selected_side_and_finishes_game(
+        self,
+        _askyesno: MagicMock,
+    ) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._clear_coaching_outputs = MagicMock()
+        gui._update_turn_status = MagicMock()
+        gui._handle_finished_manual_game = MagicMock()
+        gui._root = MagicMock()
+
+        gui._on_resign(PlayerColor.WHITE)
+
+        gui._coach.record_resignation.assert_called_once_with(PlayerColor.WHITE)
+        gui._clear_coaching_outputs.assert_called_once()
+        gui._update_turn_status.assert_called_once()
+        gui._handle_finished_manual_game.assert_called_once()
+
+    def test_build_headers_include_manual_resignation_termination(self) -> None:
+        gui = ChessGui()
+        gui._engine_elo = 1500
+        gui._coach = MagicMock()
+        gui._coach._config.player_color = PlayerColor.WHITE
+        gui._coach.game_result = "0-1"
+        gui._coach.game_termination = "Black won by resignation"
+
+        headers = gui._build_headers()
+
+        assert headers["Result"] == "0-1"
+        assert headers["Termination"] == "Black won by resignation"
+
+    def test_update_turn_status_mentions_resignation_winner(self) -> None:
+        gui = ChessGui()
+        gui._coach = MagicMock()
+        gui._coach.is_game_over = True
+        gui._coach.game_winner = chess.BLACK
+        gui._coach.game_termination = "Black won by resignation"
+        gui._set_status = MagicMock()
+        gui._auto_save = MagicMock()
+
+        gui._update_turn_status()
+
+        gui._auto_save.assert_called_once()
+        gui._set_status.assert_called_once_with(
+            "Game over \u2014 Black wins by resignation!",
+            game_over=True,
+        )
 
     def test_new_game_closes_post_game_review_prompt(self) -> None:
         gui = ChessGui()
