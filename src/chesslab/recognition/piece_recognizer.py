@@ -107,6 +107,23 @@ class RecognitionResult:
     uncertain_squares: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PieceLuminanceModel:
+    """Theme-relative luminance reference used for colour verification."""
+
+    white_value: float
+    black_value: float
+
+    @property
+    def separation(self) -> float:
+        return abs(self.white_value - self.black_value)
+
+    def classify(self, observed_value: float) -> str:
+        white_distance = abs(observed_value - self.white_value)
+        black_distance = abs(observed_value - self.black_value)
+        return "w" if white_distance <= black_distance else "b"
+
+
 # ---------------------------------------------------------------------------
 # Template key helpers
 # ---------------------------------------------------------------------------
@@ -142,6 +159,11 @@ _COLOR_SWAP: dict[PieceType, PieceType] = {
     PieceType.BLACK_KNIGHT: PieceType.WHITE_KNIGHT,
     PieceType.BLACK_PAWN: PieceType.WHITE_PAWN,
 }
+
+_DEFAULT_PIECE_LUMINANCE_MODEL = PieceLuminanceModel(
+    white_value=200.0,
+    black_value=90.0,
+)
 
 
 def _parse_template_key(key: str) -> tuple[PieceType, str]:
@@ -181,7 +203,7 @@ class PieceRecognizer:
     _FOREGROUND_DISTANCE_THRESHOLD: float = 20.0
     _BACKGROUND_NORMALIZATION_DISTANCE_THRESHOLD: float = 28.0
     _LABEL_CLEANUP_DISTANCE_THRESHOLD: float = 10.0
-    _PIECE_COLOR_LUMINANCE_THRESHOLD: float = 147.0
+    _MIN_PIECE_LUMINANCE_SEPARATION: float = 10.0
 
     def __init__(self, config: RecognitionConfig | None = None) -> None:
         self._config = config or RecognitionConfig()
@@ -195,6 +217,7 @@ class PieceRecognizer:
         self._synthetic = False
         self._load_theme(self._config.theme)
         self._canonical_backgrounds = self._estimate_canonical_backgrounds()
+        self._piece_luminance_model = self._build_piece_luminance_model()
 
         # Precomputed feature matrices, keyed by background.
         # Each value is (piece_list, feature_matrix) where feature_matrix has
@@ -239,6 +262,7 @@ class PieceRecognizer:
 
         classifications: dict[str, SquareClassification] = {}
         uncertain_names: list[str] = []
+        prepared_images: dict[str, NDArray[np.uint8]] = {}
         pending_by_background: dict[str, list[tuple[str, NDArray[np.float32]]]] = {
             "light": [],
             "dark": [],
@@ -246,6 +270,7 @@ class PieceRecognizer:
 
         for name, square in squares.items():
             prepared = self._prepare_square_image(square)
+            prepared_images[name] = prepared
             background = square_background(square.file, square.rank)
             canonical_background = self._canonical_backgrounds[background]
             occupancy_ratio = self._occupancy_ratio(prepared, canonical_background)
@@ -311,7 +336,11 @@ class PieceRecognizer:
                     uncertain_names.append(name)
 
         if not self._synthetic:
-            classifications = self._verify_piece_colors(classifications, squares)
+            classifications = self._verify_piece_colors(
+                classifications,
+                squares,
+                prepared_images=prepared_images,
+            )
 
         elapsed = (time.perf_counter() - start) * 1000
 
@@ -337,14 +366,17 @@ class PieceRecognizer:
         self,
         classifications: dict[str, SquareClassification],
         squares: dict[str, SquareImage],
+        *,
+        prepared_images: dict[str, NDArray[np.uint8]],
     ) -> dict[str, SquareClassification]:
-        """Correct piece colour using absolute foreground luminance.
+        """Correct piece colour using theme-relative foreground luminance.
 
         Template matching may assign the wrong colour when the piece occupies
         a different physical board position than the template source (e.g.
-        black perspective vs white perspective).  The shape match is reliable
-        but the colour can be verified independently: white pieces have a
-        high luminance (~190–220) and black pieces a low one (~80–110).
+        black perspective vs white perspective). The shape match is reliable
+        but the colour can be verified independently by comparing the square's
+        observed piece luminance against the luminance profile learned from the
+        currently loaded theme templates.
 
         Only non-empty, non-low-confidence classifications are corrected.
         """
@@ -356,7 +388,10 @@ class PieceRecognizer:
                 continue
 
             square = squares[name]
-            lum_color = self._luminance_color(square)
+            lum_color = self._luminance_color(
+                square,
+                prepared_image=prepared_images.get(name),
+            )
             if lum_color is None:
                 corrected[name] = cls
                 continue
@@ -384,29 +419,21 @@ class PieceRecognizer:
     def _luminance_color(
         self,
         square: SquareImage,
+        *,
+        prepared_image: NDArray[np.uint8] | None = None,
     ) -> str | None:
-        """Return ``'w'`` or ``'b'`` based on the centre-region luminance.
-
-        Uses the inner ~30 % of the square image (by each dimension) to
-        isolate the piece body from the board background and any move
-        highlights that chess sites may render.
-
-        Returns ``None`` when the centre crop is too small to be reliable.
-        """
-        bgr = self._ensure_bgr(square.image)
-        h, w = bgr.shape[:2]
-        margin = max(1, int(0.35 * min(h, w)))
-        centre = bgr[margin : h - margin, margin : w - margin]
-        if centre.size < 30:
+        """Return ``'w'`` or ``'b'`` based on theme-relative centre luminance."""
+        if self._piece_luminance_model.separation < self._MIN_PIECE_LUMINANCE_SEPARATION:
             return None
 
-        # BT.601 luminance (BGR channel order)
-        luminance = (
-            0.114 * centre[:, :, 0].astype(np.float32)
-            + 0.587 * centre[:, :, 1].astype(np.float32)
-            + 0.299 * centre[:, :, 2].astype(np.float32)
-        )
-        return "w" if float(luminance.mean()) > self._PIECE_COLOR_LUMINANCE_THRESHOLD else "b"
+        prepared = prepared_image
+        if prepared is None:
+            prepared = self._prepare_square_image(square)
+
+        luminance = self._centre_luminance(prepared)
+        if luminance is None:
+            return None
+        return self._piece_luminance_model.classify(luminance)
 
     # -- Theme loading ------------------------------------------------------
 
@@ -625,6 +652,30 @@ class PieceRecognizer:
             colours[background] = np.median(np.stack(samples), axis=0).astype(np.uint8)
         return colours
 
+    def _build_piece_luminance_model(self) -> PieceLuminanceModel:
+        """Estimate theme-specific piece luminance centroids from templates."""
+        samples: dict[str, list[float]] = {"w": [], "b": []}
+        for templates in self._templates.values():
+            for piece, image in templates.items():
+                luminance = self._centre_luminance(image)
+                if luminance is None:
+                    continue
+                colour = "w" if piece.value.isupper() else "b"
+                samples[colour].append(luminance)
+
+        if not samples["w"] or not samples["b"]:
+            logger.debug(
+                "Falling back to default piece luminance model; template samples "
+                "were incomplete for theme '%s'.",
+                self._config.theme,
+            )
+            return _DEFAULT_PIECE_LUMINANCE_MODEL
+
+        return PieceLuminanceModel(
+            white_value=float(np.median(samples["w"])),
+            black_value=float(np.median(samples["b"])),
+        )
+
     @classmethod
     def _estimate_background_colour(cls, image: NDArray[np.uint8]) -> NDArray[np.float32]:
         """Estimate a square's background colour from its borders."""
@@ -692,6 +743,22 @@ class PieceRecognizer:
         else:
             vec[:] = 0.0
         return vec
+
+    def _centre_luminance(self, image: NDArray[np.uint8]) -> float | None:
+        """Estimate luminance from the centre crop of a square or template."""
+        bgr = self._ensure_bgr(image)
+        h, w = bgr.shape[:2]
+        margin = max(1, int(0.35 * min(h, w)))
+        centre = bgr[margin : h - margin, margin : w - margin]
+        if centre.size < 30:
+            return None
+
+        luminance = (
+            0.114 * centre[:, :, 0].astype(np.float32)
+            + 0.587 * centre[:, :, 1].astype(np.float32)
+            + 0.299 * centre[:, :, 2].astype(np.float32)
+        )
+        return float(luminance.mean())
 
     def _occupancy_ratio(
         self,

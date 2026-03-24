@@ -22,8 +22,9 @@ Each profile defines:
 
 Current user-facing Observe Live perimeter:
 
-- `chesscom_green_white`: `official` reference setup and the only currently recommended routine live path.
-- `chesscom_green_black`: `candidate` setup with real in-repo captures; validation evidence is tracked, but promotion remains blocked until the dataset contract passes consistently.
+- `chesscom_green_white`: `official` reference setup with real extracted templates and real in-repo validation captures.
+- `chesscom_green_black`: `official` black-perspective setup with real extracted templates and real in-repo validation captures.
+- `chesscom_brown_white`: `candidate` chess.com brown setup with real extracted templates and real in-repo validation captures.
 - synthetic-template profiles remain in the catalog for engineering experiments and are not presented as recommended Observe Live setups.
 
 List profiles:

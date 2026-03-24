@@ -47,7 +47,7 @@ PYTHONPATH=src ./.venv/bin/python scripts/remote_live.py \
 
 Notes:
 
-- `chess.com-green` is the only template family currently exposed in the narrow Observe Live perimeter.
+- `chess.com-green` and `chess.com-brown` are currently exposed in the narrow Observe Live perimeter when a real-template setup profile is available.
 - Use `--black-perspective` if the board is flipped.
 - Use `--allow-uncertain` only if you want a FEN even when recognition confidence is low.
 

@@ -57,6 +57,7 @@ def test_list_options_prioritizes_official_profiles_and_hides_synthetic_setups()
     assert options[0].support_label == "OFFICIAL"
     assert options[0].recommended is True
     assert {option.profile_id for option in options} == {
+        "chesscom_brown_white",
         "chesscom_green_white",
         "chesscom_green_black",
     }

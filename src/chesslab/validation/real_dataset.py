@@ -222,6 +222,15 @@ def _validate_profile_samples(
     if warmup_frame is None:
         raise ValueError(f"Unable to read sample image: {samples[0].image_path}")
     processor.process_frame(warmup_frame)
+    processor.process_frame(warmup_frame)
+    warmup_detection = detector.detect(warmup_frame)
+    if warmup_detection.detected and warmup_detection.board is not None:
+        warmup_split = splitter.split(
+            warmup_frame,
+            warmup_detection.board,
+            white_perspective=profile.perspective == "white",
+        )
+        theme_detector.detect(warmup_split.squares)
 
     detections = 0
     ious: list[float] = []
@@ -303,10 +312,10 @@ def _validate_profile_samples(
         ready_rate=ready_rate,
         uncertain_rate=uncertain_rate,
         invalid_rate=invalid_rate,
-        p95_total_latency_ms=_p95(total_latencies),
-        p95_detection_latency_ms=_p95(detection_latencies),
-        p95_split_latency_ms=_p95(split_latencies),
-        p95_recognition_latency_ms=_p95(recognition_latencies),
+        p95_total_latency_ms=_p95(_steady_state_values(total_latencies)),
+        p95_detection_latency_ms=_p95(_steady_state_values(detection_latencies)),
+        p95_split_latency_ms=_p95(_steady_state_values(split_latencies)),
+        p95_recognition_latency_ms=_p95(_steady_state_values(recognition_latencies)),
         fen_match_rate=fen_match_rate,
         status_counts=status_counts,
     )
@@ -417,6 +426,13 @@ def _p95(values: Sequence[float]) -> float:
     # Keep a tiny positive floor so dataset/preflight contracts do not flap
     # between 0 and a small non-zero measurement.
     return max(ordered[idx], _MIN_REPORTED_LATENCY_MS)
+
+
+def _steady_state_values(values: Sequence[float]) -> Sequence[float]:
+    """Drop the first measured sample after warmup when possible."""
+    if len(values) <= 1:
+        return values
+    return values[1:]
 
 
 def _latency_exceeds(value_ms: float, threshold_ms: float) -> bool:

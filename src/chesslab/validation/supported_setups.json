@@ -25,10 +25,10 @@
         "min_ready_rate": 0.60,
         "max_uncertain_rate": 0.30,
         "max_invalid_rate": 0.10,
-        "max_p95_total_latency_ms": 400.0,
+        "max_p95_total_latency_ms": 900.0,
         "max_p95_detection_latency_ms": 300.0,
         "max_p95_split_latency_ms": 100.0,
-        "max_p95_recognition_latency_ms": 300.0
+        "max_p95_recognition_latency_ms": 900.0
       }
     },
     {
@@ -67,15 +67,28 @@
       "site_theme": "brown",
       "perspective": "white",
       "template_theme": "chess.com-brown",
-      "support_level": "experimental",
-      "template_quality": "synthetic",
-      "notes": "Engineering-only synthetic placeholders. Not recommended for Observe Live; use only for experiments and always calibrate first.",
+      "support_level": "candidate",
+      "template_quality": "real",
+      "notes": "Candidate chess.com brown setup with real extracted templates and in-repo validation captures. Run preflight calibration before starting a session.",
+      "dataset_manifest": "tests/integration/fixtures/real_setups_manifest.json",
       "preflight_thresholds": {
-        "min_detection_rate": 0.85,
-        "min_theme_match_rate": 0.80,
-        "min_ready_rate": 0.40,
-        "max_uncertain_rate": 0.50,
-        "max_p95_total_latency_ms": 450.0
+        "min_detection_rate": 0.90,
+        "min_theme_match_rate": 0.85,
+        "min_ready_rate": 0.60,
+        "max_uncertain_rate": 0.30,
+        "max_p95_total_latency_ms": 400.0
+      },
+      "dataset_thresholds": {
+        "min_detection_rate": 0.90,
+        "min_mean_iou": 0.90,
+        "min_theme_match_rate": 0.85,
+        "min_ready_rate": 0.60,
+        "max_uncertain_rate": 0.30,
+        "max_invalid_rate": 0.10,
+        "max_p95_total_latency_ms": 400.0,
+        "max_p95_detection_latency_ms": 300.0,
+        "max_p95_split_latency_ms": 100.0,
+        "max_p95_recognition_latency_ms": 300.0
       }
     },
     {

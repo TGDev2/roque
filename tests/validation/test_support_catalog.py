@@ -40,12 +40,25 @@ def test_black_official_profile_is_backed_by_real_dataset() -> None:
     assert profile.dataset_thresholds is not None
 
 
+def test_brown_candidate_profile_is_backed_by_real_templates_and_dataset() -> None:
+    catalog = load_support_catalog()
+    profile = catalog.get_profile("chesscom_brown_white")
+
+    assert profile is not None
+    assert profile.support_level.value == "candidate"
+    assert profile.uses_real_templates is True
+    assert profile.has_real_dataset is True
+    assert profile.dataset_thresholds is not None
+    assert profile.preflight_thresholds.min_detection_rate >= 0.9
+
+
 def test_live_profiles_expose_only_real_template_official_or_candidate_setups() -> None:
     catalog = load_support_catalog()
 
     profiles = catalog.live_profiles()
 
     assert {profile.id for profile in profiles} == {
+        "chesscom_brown_white",
         "chesscom_green_white",
         "chesscom_green_black",
     }

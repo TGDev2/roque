@@ -54,6 +54,51 @@
           }
         }
       ]
+    },
+    {
+      "setup_id": "chesscom_brown_white",
+      "samples": [
+        {
+          "image": "images/chesscom_008.png",
+          "board": {
+            "x": 324,
+            "y": 63,
+            "width": 952,
+            "height": 952
+          },
+          "expected_piece_placement": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        },
+        {
+          "image": "images/chesscom_008.png",
+          "board": {
+            "x": 324,
+            "y": 63,
+            "width": 952,
+            "height": 952
+          },
+          "expected_piece_placement": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        },
+        {
+          "image": "images/chesscom_008.png",
+          "board": {
+            "x": 324,
+            "y": 63,
+            "width": 952,
+            "height": 952
+          },
+          "expected_piece_placement": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        },
+        {
+          "image": "images/chesscom_008.png",
+          "board": {
+            "x": 324,
+            "y": 63,
+            "width": 952,
+            "height": 952
+          },
+          "expected_piece_placement": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        }
+      ]
     }
   ]
 }

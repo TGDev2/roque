@@ -133,9 +133,26 @@ def _make_piece_square(
     piece_key: str, bg: str, size: int = SIZE,
 ) -> NDArray[np.uint8]:
     """Create a square image matching the synthetic template pattern."""
+    return _make_piece_square_with_colours(
+        piece_key,
+        bg,
+        size=size,
+    )
+
+
+def _make_piece_square_with_colours(
+    piece_key: str,
+    bg: str,
+    *,
+    white_piece: tuple[int, int, int] = WHITE_PIECE,
+    black_piece: tuple[int, int, int] = BLACK_PIECE,
+    size: int = SIZE,
+) -> NDArray[np.uint8]:
+    """Create a square image using custom white/black piece colours."""
     img = np.full((size, size, 3), _bg_colour(bg), dtype=np.uint8)
     letter = piece_key[1]
-    _DRAW_FNS[letter](img, _piece_colour(piece_key))  # type: ignore[operator]
+    piece_colour = white_piece if piece_key[0] == "w" else black_piece
+    _DRAW_FNS[letter](img, piece_colour)  # type: ignore[operator]
     return img
 
 
@@ -155,7 +172,25 @@ def _bg_for_square(file_idx: int, rank_idx: int) -> str:
 
 def _make_synthetic_theme(tmp_path: Path, size: int = SIZE) -> Path:
     """Create a temporary theme directory with synthetic templates."""
-    theme_dir = tmp_path / "themes" / "test_theme"
+    return _make_theme(
+        tmp_path,
+        size=size,
+        theme_name="test_theme",
+        synthetic=True,
+    )
+
+
+def _make_theme(
+    tmp_path: Path,
+    *,
+    size: int = SIZE,
+    theme_name: str = "test_theme",
+    synthetic: bool = True,
+    white_piece: tuple[int, int, int] = WHITE_PIECE,
+    black_piece: tuple[int, int, int] = BLACK_PIECE,
+) -> Path:
+    """Create a temporary test theme with configurable piece luminance."""
+    theme_dir = tmp_path / "themes" / theme_name
     theme_dir.mkdir(parents=True)
 
     templates: dict[str, str] = {}
@@ -163,16 +198,23 @@ def _make_synthetic_theme(tmp_path: Path, size: int = SIZE) -> Path:
         for bg in ("light", "dark"):
             tkey = f"{key}_{bg}"
             filename = f"{tkey}.png"
-            img = _make_piece_square(key, bg, size)
+            img = _make_piece_square_with_colours(
+                key,
+                bg,
+                size=size,
+                white_piece=white_piece,
+                black_piece=black_piece,
+            )
             cv2.imwrite(str(theme_dir / filename), img)
             templates[tkey] = filename
 
     manifest = {
-        "name": "test_theme",
-        "description": "Synthetic test theme",
-        "synthetic": True,
+        "name": theme_name,
+        "description": "Synthetic test theme" if synthetic else "Real-like test theme",
         "templates": templates,
     }
+    if synthetic:
+        manifest["synthetic"] = True
     with (theme_dir / "theme.json").open("w") as fh:
         json.dump(manifest, fh)
 
@@ -182,6 +224,9 @@ def _make_synthetic_theme(tmp_path: Path, size: int = SIZE) -> Path:
 def _make_full_board(
     piece_map: dict[str, str],
     size: int = SIZE,
+    *,
+    white_piece: tuple[int, int, int] = WHITE_PIECE,
+    black_piece: tuple[int, int, int] = BLACK_PIECE,
 ) -> dict[str, SquareImage]:
     """Build 64 SquareImage entries.
 
@@ -195,7 +240,13 @@ def _make_full_board(
             bg = _bg_for_square(f_idx, r_idx)
             piece_key = piece_map.get(name)
             if piece_key:
-                img = _make_piece_square(piece_key, bg, size)
+                img = _make_piece_square_with_colours(
+                    piece_key,
+                    bg,
+                    size=size,
+                    white_piece=white_piece,
+                    black_piece=black_piece,
+                )
             else:
                 img = _make_empty_square(bg, size)
             squares[name] = SquareImage(
@@ -287,6 +338,45 @@ class TestNominalRecognition:
         recognizer.recognize(squares)
         elapsed_ms = (time.perf_counter() - start) * 1000
         assert elapsed_ms < 200, f"Recognition took {elapsed_ms:.1f} ms (limit: 200)"
+
+
+class TestThemeRelativeColorVerification:
+    """Real-template colour verification adapts to theme luminance polarity."""
+
+    def test_dark_white_pieces_are_not_flipped(self, tmp_path: Path) -> None:
+        theme_dir = _make_theme(
+            tmp_path,
+            theme_name="inverted_real_theme",
+            synthetic=False,
+            white_piece=(40, 40, 40),
+            black_piece=(250, 250, 250),
+        )
+        recognizer = PieceRecognizer(
+            RecognitionConfig(
+                theme="inverted_real_theme",
+                templates_dir=theme_dir,
+            )
+        )
+
+        piece_map = {
+            "d4": "wP",
+            "e5": "bP",
+            "a1": "wR",
+            "h8": "bR",
+        }
+        squares = _make_full_board(
+            piece_map,
+            white_piece=(40, 40, 40),
+            black_piece=(250, 250, 250),
+        )
+        result = recognizer.recognize(squares)
+
+        for name, expected_key in piece_map.items():
+            cls = result.classifications[name]
+            expected = _KEY_TO_PIECETYPE[expected_key]
+            assert cls.piece == expected, (
+                f"Square {name}: expected {expected}, got {cls.piece}"
+            )
 
 
 # ---------------------------------------------------------------------------
