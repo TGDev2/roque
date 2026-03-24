@@ -27,10 +27,16 @@ import tkinter.ttk as ttk
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Sequence
 
 import chess
 
-from chesslab.persistence.game_storage import GameRecord, GameStorage, build_headers
+from chesslab.persistence.game_storage import (
+    GameRecord,
+    GameStorage,
+    GameSummary,
+    build_headers,
+)
 from chesslab.persistence.remote_import import (
     RemoteGameCandidate,
     RemoteGameSource,
@@ -78,6 +84,13 @@ from chesslab.gui.panels import (
     ReviewPanel,
     SuggestionsPanel,
     TrainingPanel,
+)
+from chesslab.review.batch_review import (
+    BatchReviewItemResult,
+    BatchReviewItemStatus,
+    BatchReviewResult,
+    BatchReviewService,
+    BatchReviewTarget,
 )
 from chesslab.review.game_reviewer import (
     GameReview,
@@ -246,6 +259,26 @@ class GuiConfig:
     progression_sample_size: int = 20
 
 
+@dataclass(frozen=True)
+class _BatchReviewStartedEvent:
+    index: int
+    target: BatchReviewTarget
+
+
+@dataclass(frozen=True)
+class _BatchReviewProgressEvent:
+    index: int
+    target: BatchReviewTarget
+    current: int
+    total: int
+
+
+@dataclass(frozen=True)
+class _BatchReviewFinishedEvent:
+    index: int
+    result: BatchReviewItemResult
+
+
 # ---------------------------------------------------------------------------
 # Main GUI class
 # ---------------------------------------------------------------------------
@@ -280,6 +313,15 @@ class ChessGui:
         self._remote_import = RemoteImportService(storage=self._storage)
         self._review_history = ReviewHistoryStorage()
         self._progress_tracker = ProgressTracker(self._review_history)
+        self._batch_review = BatchReviewService(
+            storage=self._storage,
+            review_history=self._review_history,
+            review_config=ReviewConfig(
+                stockfish_path=self._config.analysis.stockfish_path,
+                depth=self._config.analysis.depth,
+                time_limit=self._config.analysis.time_limit,
+            ),
+        )
         self._training_service = WeaknessTrainingService(ReviewConfig(
             stockfish_path=self._config.analysis.stockfish_path,
             depth=self._config.analysis.depth,
@@ -300,6 +342,28 @@ class ChessGui:
         self._progress_dialog: tk.Toplevel | None = None
         self._progress_bar: ttk.Progressbar | None = None
         self._post_game_review_dialog: tk.Toplevel | None = None
+
+        # Batch review state.
+        self._batch_review_cancel: threading.Event | None = None
+        self._batch_review_queue: queue.Queue[
+            _BatchReviewStartedEvent
+            | _BatchReviewProgressEvent
+            | _BatchReviewFinishedEvent
+            | BatchReviewResult
+            | Exception
+        ] = queue.Queue()
+        self._batch_review_dialog: tk.Toplevel | None = None
+        self._batch_review_progress_bar: ttk.Progressbar | None = None
+        self._batch_review_overall_label: tk.Label | None = None
+        self._batch_review_current_label: tk.Label | None = None
+        self._batch_review_listbox: tk.Listbox | None = None
+        self._batch_review_close_btn: tk.Button | None = None
+        self._batch_review_progression_btn: tk.Button | None = None
+        self._batch_review_training_btn: tk.Button | None = None
+        self._batch_review_targets: tuple[BatchReviewTarget, ...] = ()
+        self._batch_review_results: dict[int, BatchReviewItemResult] = {}
+        self._batch_review_current_progress: tuple[int, int, int] | None = None
+        self._batch_review_result: BatchReviewResult | None = None
 
         # Training mode state.
         self._in_training_mode: bool = False
@@ -514,7 +578,10 @@ class ChessGui:
             ),
             (
                 "Review Recent",
-                review_journey.launcher_summary,
+                (
+                    "Open your saved PGNs, select one or more games, and run a "
+                    "post-game review queue that feeds progression and training."
+                ),
                 StartupJourneyMode.REVIEW_RECENT,
             ),
             (
@@ -526,7 +593,7 @@ class ChessGui:
                 "Import Lichess",
                 (
                     "Fetch your latest public Lichess games by username, select the "
-                    "ones you want, and add them directly to Review Recent."
+                    "ones you want, then import and review them in one flow."
                 ),
                 StartupJourneyMode.IMPORT_LICHESS,
             ),
@@ -534,7 +601,7 @@ class ChessGui:
                 "Import Chess.com",
                 (
                     "Fetch your latest public Chess.com archive games by username, "
-                    "select one or more, and save them straight into Review Recent."
+                    "select one or more, then import and review them in one flow."
                 ),
                 StartupJourneyMode.IMPORT_CHESS_COM,
             ),
@@ -2517,6 +2584,22 @@ class ChessGui:
 
         try:
             while True:
+                item = self._batch_review_queue.get_nowait()
+                if isinstance(item, _BatchReviewStartedEvent):
+                    self._on_batch_review_item_started(item)
+                elif isinstance(item, _BatchReviewProgressEvent):
+                    self._on_batch_review_item_progress(item)
+                elif isinstance(item, _BatchReviewFinishedEvent):
+                    self._on_batch_review_item_finished(item)
+                elif isinstance(item, BatchReviewResult):
+                    self._on_batch_review_complete(item)
+                elif isinstance(item, Exception):
+                    self._on_batch_review_failed(item)
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
                 request_id, item = self._training_queue.get_nowait()
                 if request_id != self._training_request_id:
                     continue
@@ -2683,6 +2766,9 @@ class ChessGui:
     def _on_close(self) -> None:
         """Clean up resources and close the window."""
         self._close_post_game_review_dialog()
+        if self._batch_review_cancel is not None:
+            self._batch_review_cancel.set()
+        self._close_batch_review_dialog()
         if self._in_training_mode:
             self._exit_training_mode()
         self._auto_save()
@@ -2854,6 +2940,7 @@ class ChessGui:
         """Show a dialog listing recently saved games."""
         assert self._root is not None
         games = self._storage.list_recent_games()
+        reviewed_paths = self._reviewed_source_paths()
 
         dialog = tk.Toplevel(self._root)
         dialog.title("Recent Games")
@@ -2884,6 +2971,7 @@ class ChessGui:
                 bg=_BG_SECONDARY,
                 fg=_FG,
                 font=("monospace", 10),
+                selectmode="extended",
                 selectbackground=_ACCENT,
                 selectforeground="#ffffff",
                 relief="flat",
@@ -2894,12 +2982,14 @@ class ChessGui:
             )
             listbox.pack(fill="both", expand=True, padx=1, pady=1)
 
-            for g in games:
-                line = (
-                    f"{g.date}  {g.white} vs {g.black}"
-                    f"  {g.result}  {g.move_count} moves"
+            for index, game in enumerate(games):
+                line = self._format_recent_game_label(
+                    game,
+                    reviewed=str(game.file_path.resolve()) in reviewed_paths,
                 )
                 listbox.insert("end", line)
+                if str(game.file_path.resolve()) not in reviewed_paths:
+                    listbox.selection_set(index)
 
             def on_load() -> None:
                 sel = listbox.curselection()
@@ -2913,9 +3003,12 @@ class ChessGui:
                 sel = listbox.curselection()
                 if not sel:
                     return
-                selected_game = games[sel[0]]
                 dialog.destroy()
-                self._review_from_file(selected_game.file_path)
+                selected_games = [games[int(index)] for index in sel]
+                self._start_batch_review(
+                    self._build_batch_review_recent_targets(selected_games),
+                    origin_label="Recent games",
+                )
 
             listbox.bind("<Double-Button-1>", lambda e: on_load())
 
@@ -2936,7 +3029,7 @@ class ChessGui:
 
             review_btn = _styled_button(
                 btn_frame,
-                text="Review",
+                text="Review Selected",
                 command=on_review,
                 font=("sans-serif", 10, "bold"),
             )
@@ -3153,7 +3246,7 @@ class ChessGui:
                 set_feedback(message)
                 self._set_status(f"{source.label}: {message}")
 
-        def on_import() -> None:
+        def on_import(*, review_after_import: bool = False) -> None:
             nonlocal games
             selection = listbox.curselection()
             if not games:
@@ -3164,7 +3257,8 @@ class ChessGui:
                 return
 
             selected_games = [games[int(index)] for index in selection]
-            set_feedback("Importing selected games...")
+            action_label = "Importing and queuing reviews" if review_after_import else "Importing selected games"
+            set_feedback(f"{action_label}...")
             dialog.update_idletasks()
 
             result = self._remote_import.import_games(selected_games)
@@ -3190,6 +3284,20 @@ class ChessGui:
                 set_feedback(summary, success=result.imported_count > 0)
             self._set_status(summary, error=result.failed_count > 0 and result.imported_count == 0)
 
+            if review_after_import:
+                review_targets = self._build_batch_review_import_targets(result)
+                if not review_targets:
+                    set_feedback(
+                        f"{summary}\nNo local PGNs are available to review from this selection.",
+                        error=True,
+                    )
+                    return
+                dialog.destroy()
+                self._start_batch_review(
+                    review_targets,
+                    origin_label=f"{source.label} import",
+                )
+
         btn_frame = tk.Frame(container, bg=_BG)
         btn_frame.pack(fill="x", pady=(10, 0))
 
@@ -3212,6 +3320,14 @@ class ChessGui:
             font=("sans-serif", 10, "bold"),
         )
         import_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+        import_review_btn = _styled_button(
+            btn_frame,
+            text="Import + Review",
+            command=lambda: on_import(review_after_import=True),
+            font=("sans-serif", 10, "bold"),
+        )
+        import_review_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
 
         close_btn = _styled_button(
             btn_frame,
@@ -3255,6 +3371,626 @@ class ChessGui:
         if not fragments:
             return f"{source.label}: nothing was imported."
         return f"{source.label}: {', '.join(fragments)}."
+
+    def _reviewed_source_paths(self) -> set[str]:
+        """Return the local PGN paths already present in review history."""
+        try:
+            return {
+                summary.source_path
+                for summary in self._review_history.list_recent_reviews(limit=None)
+                if summary.source_path
+            }
+        except Exception:
+            logger.exception("Failed to load reviewed game paths.")
+            return set()
+
+    @staticmethod
+    def _format_recent_game_label(
+        game: GameSummary,
+        *,
+        reviewed: bool = False,
+    ) -> str:
+        line = (
+            f"{game.date}  {game.white} vs {game.black}"
+            f"  {game.result}  {game.move_count} moves"
+        )
+        if reviewed:
+            return f"{line}  reviewed"
+        return line
+
+    @staticmethod
+    def _format_batch_review_line(
+        target: BatchReviewTarget,
+        *,
+        status: str,
+        detail: str | None = None,
+    ) -> str:
+        parts = [status, target.display_label]
+        if detail:
+            parts.append(detail)
+        return "  |  ".join(parts)
+
+    @classmethod
+    def _format_batch_review_result_line(
+        cls,
+        result: BatchReviewItemResult,
+    ) -> str:
+        if result.status is BatchReviewItemStatus.COMPLETED:
+            detail = result.message
+            if result.summary is not None:
+                detail = f"avg {result.summary.avg_cp_loss:.0f}cp"
+            return cls._format_batch_review_line(
+                result.target,
+                status="Done",
+                detail=detail,
+            )
+        if result.status is BatchReviewItemStatus.SKIPPED_ALREADY_REVIEWED:
+            return cls._format_batch_review_line(
+                result.target,
+                status="Skipped",
+                detail="already reviewed",
+            )
+        if result.status is BatchReviewItemStatus.SKIPPED_DUPLICATE_SELECTION:
+            return cls._format_batch_review_line(
+                result.target,
+                status="Skipped",
+                detail="duplicate selection",
+            )
+        if result.status is BatchReviewItemStatus.CANCELLED:
+            return cls._format_batch_review_line(
+                result.target,
+                status="Cancelled",
+                detail=result.message,
+            )
+        return cls._format_batch_review_line(
+            result.target,
+            status="Failed",
+            detail=result.message,
+        )
+
+    def _build_batch_review_recent_targets(
+        self,
+        games: Sequence[GameSummary],
+    ) -> tuple[BatchReviewTarget, ...]:
+        return tuple(
+            BatchReviewTarget(
+                file_path=game.file_path,
+                label=self._format_recent_game_label(game),
+            )
+            for game in games
+        )
+
+    @staticmethod
+    def _build_batch_review_import_targets(
+        result: RemoteImportBatchResult,
+    ) -> tuple[BatchReviewTarget, ...]:
+        return tuple(
+            BatchReviewTarget(
+                file_path=item.file_path,
+                label=item.game.display_label(),
+            )
+            for item in result.resolved_games
+        )
+
+    def _start_batch_review(
+        self,
+        targets: Sequence[BatchReviewTarget],
+        *,
+        origin_label: str,
+    ) -> bool:
+        """Launch a background batch review with per-game progress tracking."""
+        filtered_targets = tuple(targets)
+        if not filtered_targets:
+            self._set_status(f"{origin_label}: no games available to review.")
+            return False
+
+        if (
+            self._batch_review_dialog is not None
+            and self._batch_review_dialog.winfo_exists()
+        ):
+            self._batch_review_dialog.deiconify()
+            self._batch_review_dialog.lift()
+            self._batch_review_dialog.focus_force()
+            return False
+
+        if self._observing and not self._in_review_mode:
+            self._stop_observation()
+
+        while not self._batch_review_queue.empty():
+            try:
+                self._batch_review_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._batch_review_targets = filtered_targets
+        self._batch_review_results = {}
+        self._batch_review_current_progress = None
+        self._batch_review_result = None
+        self._batch_review_cancel = threading.Event()
+
+        self._show_batch_review_dialog(origin_label)
+
+        worker = threading.Thread(
+            target=self._batch_review_worker,
+            args=(filtered_targets,),
+            daemon=True,
+        )
+        worker.start()
+        self._set_status(
+            f"{origin_label}: reviewing {len(filtered_targets)} selected game"
+            f"{'' if len(filtered_targets) == 1 else 's'}...",
+            waiting=True,
+        )
+        logger.info("Batch review started for %d game(s).", len(filtered_targets))
+        return True
+
+    def _batch_review_worker(
+        self,
+        targets: tuple[BatchReviewTarget, ...],
+    ) -> None:
+        """Background worker: review a selection of saved PGNs."""
+        try:
+            result = self._batch_review.run(
+                targets,
+                on_item_started=(
+                    lambda index, target: self._batch_review_queue.put(
+                        _BatchReviewStartedEvent(index=index, target=target),
+                    )
+                ),
+                on_item_progress=(
+                    lambda index, target, current, total: self._batch_review_queue.put(
+                        _BatchReviewProgressEvent(
+                            index=index,
+                            target=target,
+                            current=current,
+                            total=total,
+                        ),
+                    )
+                ),
+                on_item_finished=(
+                    lambda index, item_result: self._batch_review_queue.put(
+                        _BatchReviewFinishedEvent(index=index, result=item_result),
+                    )
+                ),
+                cancel_event=self._batch_review_cancel,
+            )
+            self._batch_review_queue.put(result)
+        except Exception as exc:
+            self._batch_review_queue.put(exc)
+
+    def _show_batch_review_dialog(self, origin_label: str) -> None:
+        """Show the progress dialog for a running batch review."""
+        assert self._root is not None
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Batch Review")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", self._cancel_batch_review)
+        self._batch_review_dialog = dialog
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=20, pady=18)
+
+        tk.Label(
+            container,
+            text="Batch Review",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        tk.Label(
+            container,
+            text=(
+                f"{origin_label}: each completed review is saved immediately for "
+                "progression and training."
+            ),
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=460,
+        ).pack(anchor="w", pady=(0, 10))
+
+        self._batch_review_progress_bar = ttk.Progressbar(
+            container,
+            maximum=max(1, len(self._batch_review_targets)),
+            mode="determinate",
+            length=340,
+        )
+        self._batch_review_progress_bar.pack(fill="x", pady=(0, 8))
+
+        self._batch_review_overall_label = tk.Label(
+            container,
+            text=f"0 / {len(self._batch_review_targets)} finished",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        )
+        self._batch_review_overall_label.pack(fill="x")
+
+        self._batch_review_current_label = tk.Label(
+            container,
+            text="Waiting for the first game...",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=460,
+            anchor="w",
+        )
+        self._batch_review_current_label.pack(fill="x", pady=(4, 8))
+
+        list_frame = tk.Frame(container, bg=_CARD_BORDER)
+        list_frame.pack(fill="both", expand=True)
+
+        self._batch_review_listbox = tk.Listbox(
+            list_frame,
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("monospace", 10),
+            selectbackground=_BG_SECONDARY,
+            selectforeground=_FG,
+            activestyle="none",
+            exportselection=False,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            height=min(max(len(self._batch_review_targets), 6), 12),
+            width=72,
+        )
+        self._batch_review_listbox.pack(fill="both", expand=True, padx=1, pady=1)
+
+        for target in self._batch_review_targets:
+            self._batch_review_listbox.insert(
+                "end",
+                self._format_batch_review_line(target, status="Pending"),
+            )
+
+        btn_frame = tk.Frame(container, bg=_BG)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        self._batch_review_progression_btn = _styled_button(
+            btn_frame,
+            text="Open Progression",
+            command=self._open_progression_from_batch_review,
+            font=("sans-serif", 10, "bold"),
+        )
+        self._batch_review_progression_btn.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(0, 4),
+        )
+        self._batch_review_progression_btn.config(state="disabled")
+
+        self._batch_review_training_btn = _styled_button(
+            btn_frame,
+            text="Start Training",
+            command=self._start_training_from_batch_review,
+            font=("sans-serif", 10, "bold"),
+        )
+        self._batch_review_training_btn.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=4,
+        )
+        self._batch_review_training_btn.config(state="disabled")
+
+        self._batch_review_close_btn = _styled_button(
+            btn_frame,
+            text="Cancel",
+            command=self._cancel_batch_review,
+            font=("sans-serif", 10),
+        )
+        self._batch_review_close_btn.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            padx=(4, 0),
+        )
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _cancel_batch_review(self) -> None:
+        """Request cancellation for an in-flight batch review."""
+        if self._batch_review_cancel is None:
+            self._close_batch_review_dialog()
+            return
+        self._batch_review_cancel.set()
+        if self._batch_review_current_label is not None:
+            self._batch_review_current_label.config(
+                text="Stopping after the current engine call...",
+                fg=_LOADING,
+            )
+        self._set_status("Batch review cancellation requested.", waiting=True)
+
+    def _close_batch_review_dialog(self) -> None:
+        """Dismiss the batch review dialog and reset its state."""
+        if self._batch_review_dialog is not None:
+            self._batch_review_dialog.destroy()
+        self._batch_review_dialog = None
+        self._batch_review_progress_bar = None
+        self._batch_review_overall_label = None
+        self._batch_review_current_label = None
+        self._batch_review_listbox = None
+        self._batch_review_close_btn = None
+        self._batch_review_progression_btn = None
+        self._batch_review_training_btn = None
+        self._batch_review_cancel = None
+        self._batch_review_current_progress = None
+
+    def _batch_review_processed_counts(self) -> tuple[int, int, int, int, int]:
+        completed = 0
+        failed = 0
+        skipped = 0
+        cancelled = 0
+        for item in self._batch_review_results.values():
+            if item.status is BatchReviewItemStatus.COMPLETED:
+                completed += 1
+            elif item.status is BatchReviewItemStatus.FAILED:
+                failed += 1
+            elif item.status in {
+                BatchReviewItemStatus.SKIPPED_ALREADY_REVIEWED,
+                BatchReviewItemStatus.SKIPPED_DUPLICATE_SELECTION,
+            }:
+                skipped += 1
+            elif item.status is BatchReviewItemStatus.CANCELLED:
+                cancelled += 1
+        processed = len(self._batch_review_results)
+        return processed, completed, skipped, failed, cancelled
+
+    def _refresh_batch_review_progress(self) -> None:
+        """Update labels and progress bar from current batch state."""
+        total = len(self._batch_review_targets)
+        processed, completed, skipped, failed, cancelled = (
+            self._batch_review_processed_counts()
+        )
+
+        if self._batch_review_progress_bar is not None:
+            value = float(processed)
+            if (
+                self._batch_review_result is None
+                and self._batch_review_current_progress is not None
+            ):
+                _, current, item_total = self._batch_review_current_progress
+                if item_total > 0:
+                    value += current / item_total
+            self._batch_review_progress_bar["maximum"] = max(1, total)
+            self._batch_review_progress_bar["value"] = min(float(total), value)
+
+        if self._batch_review_overall_label is not None:
+            fragments = [f"{processed} / {total} finished"]
+            if completed:
+                fragments.append(f"{completed} done")
+            if skipped:
+                fragments.append(f"{skipped} skipped")
+            if failed:
+                fragments.append(f"{failed} failed")
+            if cancelled:
+                fragments.append(f"{cancelled} cancelled")
+            self._batch_review_overall_label.config(
+                text="  |  ".join(fragments),
+            )
+
+    def _on_batch_review_item_started(self, event: _BatchReviewStartedEvent) -> None:
+        """Reflect the start of one game review inside the dialog."""
+        self._batch_review_current_progress = (event.index, 0, 0)
+        if self._batch_review_listbox is not None:
+            self._batch_review_listbox.delete(event.index)
+            self._batch_review_listbox.insert(
+                event.index,
+                self._format_batch_review_line(
+                    event.target,
+                    status="Reviewing",
+                ),
+            )
+        if self._batch_review_current_label is not None:
+            self._batch_review_current_label.config(
+                text=(
+                    f"Current game {event.index + 1} / {len(self._batch_review_targets)}"
+                    f" — {event.target.display_label}"
+                ),
+                fg=_FG_DIM,
+            )
+        self._refresh_batch_review_progress()
+
+    def _on_batch_review_item_progress(self, event: _BatchReviewProgressEvent) -> None:
+        """Update intra-game progress for the currently reviewed target."""
+        self._batch_review_current_progress = (
+            event.index,
+            event.current,
+            event.total,
+        )
+        if self._batch_review_listbox is not None:
+            self._batch_review_listbox.delete(event.index)
+            self._batch_review_listbox.insert(
+                event.index,
+                self._format_batch_review_line(
+                    event.target,
+                    status="Reviewing",
+                    detail=f"{event.current} / {event.total}",
+                ),
+            )
+        if self._batch_review_current_label is not None:
+            self._batch_review_current_label.config(
+                text=(
+                    f"Current game {event.index + 1} / {len(self._batch_review_targets)}"
+                    f" — {event.target.display_label} — {event.current} / {event.total} plies"
+                ),
+                fg=_FG_DIM,
+            )
+        self._refresh_batch_review_progress()
+
+    def _on_batch_review_item_finished(self, event: _BatchReviewFinishedEvent) -> None:
+        """Update one line after a game completes, fails, or is skipped."""
+        self._batch_review_results[event.index] = event.result
+        if self._batch_review_listbox is not None:
+            self._batch_review_listbox.delete(event.index)
+            self._batch_review_listbox.insert(
+                event.index,
+                self._format_batch_review_result_line(event.result),
+            )
+        if event.result.status is BatchReviewItemStatus.COMPLETED:
+            self._refresh_progression_panel()
+        self._refresh_batch_review_progress()
+
+    def _build_batch_review_completion_text(
+        self,
+        result: BatchReviewResult,
+    ) -> tuple[str, bool, bool]:
+        """Return the completion message plus progression/training readiness."""
+        if result.completed_count == 0:
+            if result.cancelled:
+                return (
+                    "Batch review stopped before any new review was saved.",
+                    False,
+                    False,
+                )
+            return (
+                "Batch review finished without adding new review history.",
+                False,
+                False,
+            )
+
+        try:
+            snapshot = self._progress_tracker.build_snapshot(
+                limit=self._progression_sample_size,
+            )
+            summaries = self._review_history.list_recent_reviews(
+                limit=self._progression_sample_size,
+            )
+            training_ready = bool(self._training_service.build_session(
+                summaries,
+                sample_size=self._progression_sample_size,
+                focus_review=self._game_review if self._in_review_mode else None,
+                session_size=1,
+            ))
+        except Exception as exc:
+            logger.exception("Failed to compute batch-review activation state.")
+            return (
+                f"Batch review complete, but follow-up insights could not be refreshed: {exc}",
+                False,
+                False,
+            )
+
+        progression_ready = snapshot.has_enough_games
+        if progression_ready and training_ready:
+            return (
+                "Batch review complete. Progression and targeted training are ready.",
+                True,
+                True,
+            )
+        if progression_ready:
+            return (
+                "Batch review complete. Progression is ready; targeted training still needs more reusable mistakes.",
+                True,
+                False,
+            )
+        if training_ready:
+            return (
+                "Batch review complete. Targeted training is ready, and "
+                f"{snapshot.games_remaining} more reviewed game"
+                f"{'' if snapshot.games_remaining == 1 else 's'} are needed for the full progression dashboard.",
+                False,
+                True,
+            )
+        return (
+            "Batch review complete. "
+            f"{snapshot.games_remaining} more reviewed game"
+            f"{'' if snapshot.games_remaining == 1 else 's'} needed for the full progression dashboard.",
+            False,
+            False,
+        )
+
+    def _on_batch_review_complete(self, result: BatchReviewResult) -> None:
+        """Finalize the dialog once the background batch review finishes."""
+        self._batch_review_result = result
+        self._batch_review_current_progress = None
+        self._refresh_batch_review_progress()
+
+        message, progression_ready, training_ready = (
+            self._build_batch_review_completion_text(result)
+        )
+        if self._batch_review_current_label is not None:
+            self._batch_review_current_label.config(
+                text=message,
+                fg=_SUCCESS if result.completed_count else _FG_DIM,
+            )
+
+        if self._batch_review_progression_btn is not None:
+            self._batch_review_progression_btn.config(
+                state="normal" if progression_ready else "disabled",
+            )
+        if self._batch_review_training_btn is not None:
+            self._batch_review_training_btn.config(
+                state="normal" if training_ready else "disabled",
+            )
+        if self._batch_review_close_btn is not None:
+            self._batch_review_close_btn.config(
+                text="Close",
+                command=self._close_batch_review_dialog,
+            )
+
+        status = (
+            f"Batch review: {result.completed_count} completed, "
+            f"{result.failed_count} failed, "
+            f"{result.skipped_reviewed_count + result.skipped_duplicate_count} skipped"
+        )
+        if result.cancelled:
+            status += ", cancelled"
+        if progression_ready:
+            status += " — progression ready"
+        if training_ready:
+            status += " — training ready"
+        self._set_status(status, error=result.completed_count == 0 and result.failed_count > 0)
+        logger.info(
+            "Batch review complete: completed=%d failed=%d skipped=%d cancelled=%s",
+            result.completed_count,
+            result.failed_count,
+            result.skipped_reviewed_count + result.skipped_duplicate_count,
+            result.cancelled,
+        )
+
+    def _on_batch_review_failed(self, exc: Exception) -> None:
+        """Handle an unexpected batch orchestration failure."""
+        logger.exception("Batch review failed: %s", exc)
+        if self._batch_review_current_label is not None:
+            self._batch_review_current_label.config(
+                text=f"Batch review failed: {exc}",
+                fg=_ERROR,
+            )
+        if self._batch_review_close_btn is not None:
+            self._batch_review_close_btn.config(
+                text="Close",
+                command=self._close_batch_review_dialog,
+            )
+        if self._batch_review_progression_btn is not None:
+            self._batch_review_progression_btn.config(state="disabled")
+        if self._batch_review_training_btn is not None:
+            self._batch_review_training_btn.config(state="disabled")
+        self._set_status(f"Batch review failed: {exc}", error=True)
+
+    def _open_progression_from_batch_review(self) -> None:
+        """Close the batch dialog and jump to the progression dashboard."""
+        self._close_batch_review_dialog()
+        self._show_progression_dialog()
+
+    def _start_training_from_batch_review(self) -> None:
+        """Close the batch dialog and jump to targeted training."""
+        self._close_batch_review_dialog()
+        self._start_training_from_dashboard()
 
     def _show_progression_dialog(self) -> None:
         """Show the cross-session progression dashboard."""
@@ -3432,7 +4168,10 @@ class ChessGui:
             return
         if str(self._history_panel.winfo_manager()):
             return
-        if self._btn_frame is not None:
+        if (
+            self._btn_frame is not None
+            and str(self._btn_frame.winfo_manager()) == "pack"
+        ):
             self._history_panel.pack(
                 before=self._btn_frame,
                 fill="both",

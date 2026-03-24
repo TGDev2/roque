@@ -287,5 +287,10 @@ class TestRemoteImportService:
         assert result.imported_count == 1
         assert result.skipped_count == 1
         assert result.failed_count == 0
+        assert len(result.resolved_games) == 2
+        assert result.resolved_games[0].game.game_id == "EfGh5678"
+        assert result.resolved_games[0].imported is True
+        assert result.resolved_games[1].game.game_id == "AbCd1234"
+        assert result.resolved_games[1].imported is False
         assert client.fetch_calls == ["EfGh5678", "AbCd1234"]
         assert len(list(tmp_path.glob("*.pgn"))) == 2

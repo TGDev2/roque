@@ -101,12 +101,22 @@ class RemoteImportFailure:
 
 
 @dataclass(frozen=True)
+class RemoteImportedGame:
+    """Imported or resolved local PGN for a selected remote game."""
+
+    game: RemoteGameCandidate
+    file_path: Path
+    imported: bool
+
+
+@dataclass(frozen=True)
 class RemoteImportBatchResult:
     """Aggregate result of importing several remote games."""
 
     imported_files: tuple[Path, ...]
     skipped_duplicates: tuple[RemoteGameCandidate, ...]
     failures: tuple[RemoteImportFailure, ...]
+    resolved_games: tuple[RemoteImportedGame, ...] = ()
 
     @property
     def imported_count(self) -> int:
@@ -119,6 +129,10 @@ class RemoteImportBatchResult:
     @property
     def failed_count(self) -> int:
         return len(self.failures)
+
+    @property
+    def resolved_files(self) -> tuple[Path, ...]:
+        return tuple(item.file_path for item in self.resolved_games)
 
 
 class RemoteGameClient:
@@ -494,6 +508,7 @@ class RemoteImportService:
         imported_files: list[Path] = []
         skipped_duplicates: list[RemoteGameCandidate] = []
         failures: list[RemoteImportFailure] = []
+        resolved_games: list[RemoteImportedGame] = []
 
         for game in games:
             try:
@@ -509,13 +524,24 @@ class RemoteImportService:
 
             if result.imported:
                 imported_files.append(result.file_path)
+                resolved_games.append(RemoteImportedGame(
+                    game=game,
+                    file_path=result.file_path,
+                    imported=True,
+                ))
             else:
                 skipped_duplicates.append(replace(game, already_imported=True))
+                resolved_games.append(RemoteImportedGame(
+                    game=game,
+                    file_path=result.file_path,
+                    imported=False,
+                ))
 
         return RemoteImportBatchResult(
             imported_files=tuple(imported_files),
             skipped_duplicates=tuple(skipped_duplicates),
             failures=tuple(failures),
+            resolved_games=tuple(resolved_games),
         )
 
 

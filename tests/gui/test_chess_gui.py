@@ -6,6 +6,7 @@ Tests the data flow and routing without requiring a display server.
 from __future__ import annotations
 
 import queue
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -18,6 +19,12 @@ from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
 from chesslab.persistence.remote_import import RemoteGameSource
 from chesslab.persistence.review_history import TrainingPositionSummary
+from chesslab.review.batch_review import (
+    BatchReviewItemResult,
+    BatchReviewItemStatus,
+    BatchReviewResult,
+    BatchReviewTarget,
+)
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
@@ -619,6 +626,103 @@ class TestTrainingMode:
             is_last=True,
         )
         gui._set_status.assert_called_once_with("Training — good move")
+
+    def test_exit_training_restores_history_without_unpacked_button_anchor(self) -> None:
+        gui = ChessGui()
+        gui._in_training_mode = True
+        gui._training_origin_review = False
+        gui._training_mode_widgets = [MagicMock()]
+        gui._btn_frame = MagicMock()
+        gui._btn_frame.winfo_manager.return_value = ""
+        gui._history_panel = MagicMock()
+        gui._history_panel.winfo_manager.return_value = ""
+        gui._set_observe_mode_ui = MagicMock()
+        gui._set_status = MagicMock()
+
+        gui._exit_training_mode()
+
+        gui._history_panel.pack.assert_called_once_with(
+            fill="both",
+            expand=True,
+            pady=(0, 6),
+        )
+
+    def test_show_history_panel_keeps_button_frame_order_when_anchor_is_packed(self) -> None:
+        gui = ChessGui()
+        gui._btn_frame = MagicMock()
+        gui._btn_frame.winfo_manager.return_value = "pack"
+        gui._history_panel = MagicMock()
+        gui._history_panel.winfo_manager.return_value = ""
+
+        gui._show_history_panel()
+
+        gui._history_panel.pack.assert_called_once_with(
+            before=gui._btn_frame,
+            fill="both",
+            expand=True,
+            pady=(0, 6),
+        )
+
+
+class TestBatchReviewHelpers:
+    def test_build_batch_review_completion_text_reports_ready_activation(self) -> None:
+        gui = ChessGui()
+        gui._progress_tracker = MagicMock()
+        gui._progress_tracker.build_snapshot.return_value = MagicMock(
+            has_enough_games=True,
+            games_remaining=0,
+        )
+        gui._review_history = MagicMock()
+        gui._review_history.list_recent_reviews.return_value = ["summary"]
+        gui._training_service = MagicMock()
+        gui._training_service.build_session.return_value = ("exercise",)
+
+        message, progression_ready, training_ready = (
+            gui._build_batch_review_completion_text(
+            BatchReviewResult(items=(
+                BatchReviewItemResult(
+                    target=BatchReviewTarget(file_path=Path("/tmp/game.pgn"), label="Game"),
+                    status=BatchReviewItemStatus.COMPLETED,
+                    message="done",
+                ),
+            )),
+            )
+        )
+
+        assert progression_ready is True
+        assert training_ready is True
+        assert "Progression and targeted training are ready" in message
+
+    def test_on_batch_review_complete_enables_activation_buttons(self) -> None:
+        gui = ChessGui()
+        gui._refresh_batch_review_progress = MagicMock()
+        gui._set_status = MagicMock()
+        gui._batch_review_current_label = MagicMock()
+        gui._batch_review_progression_btn = MagicMock()
+        gui._batch_review_training_btn = MagicMock()
+        gui._batch_review_close_btn = MagicMock()
+        gui._build_batch_review_completion_text = MagicMock(
+            return_value=("Batch ready", True, True)
+        )
+
+        result = BatchReviewResult(items=(
+            BatchReviewItemResult(
+                target=BatchReviewTarget(file_path=Path("/tmp/game.pgn"), label="Game"),
+                status=BatchReviewItemStatus.COMPLETED,
+                message="done",
+            ),
+        ))
+
+        gui._on_batch_review_complete(result)
+
+        gui._batch_review_progression_btn.config.assert_called_once_with(
+            state="normal",
+        )
+        gui._batch_review_training_btn.config.assert_called_once_with(
+            state="normal",
+        )
+        gui._batch_review_close_btn.config.assert_called_once()
+        gui._set_status.assert_called_once()
 
 
 class TestManualCoachReviewOffer:
