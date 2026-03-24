@@ -27,6 +27,11 @@ from chesslab.persistence.review_history import (
     TrainingPositionSummary,
     build_review_summary,
 )
+from chesslab.persistence.training_history import (
+    TrainingAttempt,
+    TrainingAttemptOutcome,
+    TrainingHistoryStorage,
+)
 
 __all__ = [
     "GameRecord",
@@ -45,6 +50,9 @@ __all__ = [
     "RemoteImportUserNotFoundError",
     "ReviewHistoryStorage",
     "ReviewSummary",
+    "TrainingAttempt",
+    "TrainingAttemptOutcome",
+    "TrainingHistoryStorage",
     "TrainingPositionSummary",
     "build_headers",
     "build_review_summary",

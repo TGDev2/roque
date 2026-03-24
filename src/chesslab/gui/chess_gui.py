@@ -44,6 +44,7 @@ from chesslab.persistence.remote_import import (
     RemoteImportService,
 )
 from chesslab.persistence.review_history import ReviewHistoryStorage
+from chesslab.persistence.training_history import TrainingHistoryStorage
 
 from chesslab.analysis import AnalysisConfig, ContinuousAnalysisHandle
 from chesslab.coach.game_coach import (
@@ -104,6 +105,7 @@ from chesslab.training import (
     TrainingFeedbackLabel,
     TrainingMoveFeedback,
     WeaknessTrainingService,
+    build_training_attempt,
 )
 from chesslab.product_usage import (
     OBSERVE_LIVE_ACKNOWLEDGEMENT,
@@ -321,7 +323,11 @@ class ChessGui:
         self._storage = GameStorage()
         self._remote_import = RemoteImportService(storage=self._storage)
         self._review_history = ReviewHistoryStorage()
-        self._progress_tracker = ProgressTracker(self._review_history)
+        self._training_history = TrainingHistoryStorage()
+        self._progress_tracker = ProgressTracker(
+            self._review_history,
+            self._training_history,
+        )
         self._batch_review = BatchReviewService(
             storage=self._storage,
             review_history=self._review_history,
@@ -4044,11 +4050,13 @@ class ChessGui:
             summaries = self._review_history.list_recent_reviews(
                 limit=self._progression_sample_size,
             )
+            attempts = self._training_history.list_recent_attempts(limit=None)
             training_ready = bool(self._training_service.build_session(
                 summaries,
                 sample_size=self._progression_sample_size,
                 focus_review=self._game_review if self._in_review_mode else None,
                 session_size=1,
+                training_attempts=attempts,
             ))
         except Exception as exc:
             logger.exception("Failed to compute batch-review activation state.")
@@ -4405,10 +4413,12 @@ class ChessGui:
 
         try:
             summaries = self._review_history.list_recent_reviews(limit=sample_size)
+            attempts = self._training_history.list_recent_attempts(limit=None)
             session = self._training_service.build_session(
                 summaries,
                 sample_size=sample_size,
                 focus_review=focus_review,
+                training_attempts=attempts,
             )
         except Exception as exc:
             logger.exception("Failed to build training session.")
@@ -4570,11 +4580,22 @@ class ChessGui:
         if not self._in_training_mode or self._training_panel is None:
             return
 
+        exercise = self._current_training_exercise()
+        if exercise is None:
+            return
+
         self._training_pending = False
         self._training_panel.show_feedback(
             feedback,
             is_last=self._training_index + 1 >= len(self._training_session),
         )
+
+        try:
+            self._training_history.record_attempt(
+                build_training_attempt(exercise, feedback),
+            )
+        except Exception:
+            logger.exception("Failed to persist training attempt.")
 
         if feedback.label is TrainingFeedbackLabel.GOOD:
             status = "Training — good move"

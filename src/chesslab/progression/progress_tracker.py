@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from chesslab.persistence.review_history import ReviewHistoryStorage, ReviewSummary
+from chesslab.persistence.training_history import TrainingAttempt, TrainingHistoryStorage
+from chesslab.progression.weakness_progress import (
+    TrainingThemeProgressStat,
+    WeaknessMasteryState,
+    WeaknessProgressStat,
+    build_theme_progress_stats,
+    build_weakness_progress_stats,
+)
 from chesslab.review.game_reviewer import (
     ErrorMotif,
     GamePhase,
@@ -71,6 +79,14 @@ class ProgressionSnapshot:
     top_themes: tuple[ProgressionThemeStat, ...]
     top_error_motifs: tuple[ProgressionErrorMotifStat, ...]
     error_phases: tuple[ProgressionPhaseStat, ...]
+    tracked_weaknesses: int
+    trained_weaknesses: int
+    mastered_weaknesses: int
+    relapsing_weaknesses: int
+    training_attempt_count: int
+    training_success_rate: float
+    urgent_weaknesses: tuple[WeaknessProgressStat, ...]
+    training_themes: tuple[TrainingThemeProgressStat, ...]
 
     @property
     def has_enough_games(self) -> bool:
@@ -89,19 +105,23 @@ class ProgressTracker:
     def __init__(
         self,
         review_history: ReviewHistoryStorage | None = None,
+        training_history: TrainingHistoryStorage | None = None,
         *,
         minimum_games: int = 3,
     ) -> None:
         self._review_history = review_history or ReviewHistoryStorage()
+        self._training_history = training_history or TrainingHistoryStorage()
         self._minimum_games = minimum_games
 
     def build_snapshot(self, limit: int = 20) -> ProgressionSnapshot:
         """Aggregate the most recent review summaries."""
         summaries = self._review_history.list_recent_reviews(limit=limit)
+        attempts = self._training_history.list_recent_attempts(limit=None)
         return build_progression_snapshot(
             summaries,
             sample_size=limit,
             minimum_games=self._minimum_games,
+            training_attempts=attempts,
         )
 
 
@@ -110,6 +130,7 @@ def build_progression_snapshot(
     *,
     sample_size: int,
     minimum_games: int = 3,
+    training_attempts: list[TrainingAttempt] | None = None,
 ) -> ProgressionSnapshot:
     """Aggregate already-persisted review summaries."""
     if sample_size <= 0:
@@ -200,6 +221,33 @@ def build_progression_snapshot(
         for phase in GamePhase
     )
 
+    weakness_stats = build_weakness_progress_stats(
+        summaries,
+        training_attempts=training_attempts,
+    )
+    training_themes = build_theme_progress_stats(weakness_stats)[:3]
+    tracked_weaknesses = len(weakness_stats)
+    trained_weaknesses = sum(item.attempt_count > 0 for item in weakness_stats)
+    mastered_weaknesses = sum(
+        item.mastery_state is WeaknessMasteryState.MASTERED
+        for item in weakness_stats
+    )
+    relapsing_weaknesses = sum(
+        item.mastery_state is WeaknessMasteryState.RELAPSING
+        for item in weakness_stats
+    )
+    training_attempt_count = sum(item.attempt_count for item in weakness_stats)
+    training_successes = sum(item.success_count for item in weakness_stats)
+    training_success_rate = (
+        training_successes / training_attempt_count * 100.0
+        if training_attempt_count
+        else 0.0
+    )
+    urgent_weaknesses = tuple(
+        item for item in weakness_stats
+        if item.needs_attention
+    )[:3]
+
     return ProgressionSnapshot(
         sample_size=sample_size,
         analysed_games=len(summaries),
@@ -212,4 +260,12 @@ def build_progression_snapshot(
         top_themes=top_themes,
         top_error_motifs=top_error_motifs,
         error_phases=error_phases,
+        tracked_weaknesses=tracked_weaknesses,
+        trained_weaknesses=trained_weaknesses,
+        mastered_weaknesses=mastered_weaknesses,
+        relapsing_weaknesses=relapsing_weaknesses,
+        training_attempt_count=training_attempt_count,
+        training_success_rate=training_success_rate,
+        urgent_weaknesses=urgent_weaknesses,
+        training_themes=training_themes,
     )

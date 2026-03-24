@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable
 
@@ -11,7 +12,14 @@ import chess
 
 from chesslab.analysis import AnalysisConfig, AnalysisResult, Evaluation, PositionAnalyser
 from chesslab.persistence.review_history import ReviewSummary, TrainingPositionSummary
+from chesslab.persistence.training_history import TrainingAttempt, TrainingAttemptOutcome
 from chesslab.progression import build_progression_snapshot
+from chesslab.progression.weakness_progress import (
+    WeaknessMasteryState,
+    WeaknessProgressStat,
+    WeaknessTrend,
+    build_weakness_progress_stats,
+)
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
@@ -69,6 +77,11 @@ class TrainingExercise:
     focus_reason: str
     focus_theme: LessonTheme | None = None
     focus_phase: GamePhase | None = None
+    attempt_count: int = 0
+    success_rate: float = 0.0
+    mastery_state: WeaknessMasteryState = WeaknessMasteryState.UNTRAINED
+    weakness_trend: WeaknessTrend = WeaknessTrend.STABLE
+    mastery_summary: str = "Not trained yet."
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,7 @@ class WeaknessTrainingService:
         sample_size: int = 20,
         focus_review: GameReview | None = None,
         session_size: int = 5,
+        training_attempts: list[TrainingAttempt] | None = None,
     ) -> tuple[TrainingExercise, ...]:
         """Select the most relevant training exercises from persisted reviews."""
         if sample_size <= 0:
@@ -121,7 +135,15 @@ class WeaknessTrainingService:
             relevant_summaries,
             sample_size=sample_size,
             minimum_games=1,
+            training_attempts=training_attempts,
         )
+        weakness_stats = {
+            stat.weakness_id: stat
+            for stat in build_weakness_progress_stats(
+                relevant_summaries,
+                training_attempts=training_attempts,
+            )
+        }
         theme_priority = _merge_priorities(
             _focus_review_theme_priority(focus_review),
             [stat.theme for stat in snapshot.top_themes if stat.count > 0],
@@ -141,11 +163,13 @@ class WeaknessTrainingService:
         candidates: list[TrainingExercise] = []
         for summary_index, summary in enumerate(relevant_summaries):
             for position in summary.training_positions:
+                weakness_stat = weakness_stats.get(position.weakness_id)
                 score, focus_theme, focus_phase = _score_position(
                     position,
                     theme_priority=theme_priority,
                     phase_priority=phase_priority,
                     summary_index=summary_index,
+                    weakness_stat=weakness_stat,
                 )
                 candidates.append(TrainingExercise(
                     game_id=summary.game_id,
@@ -160,6 +184,31 @@ class WeaknessTrainingService:
                     ),
                     focus_theme=focus_theme,
                     focus_phase=focus_phase,
+                    attempt_count=(
+                        weakness_stat.attempt_count
+                        if weakness_stat is not None
+                        else 0
+                    ),
+                    success_rate=(
+                        weakness_stat.success_rate
+                        if weakness_stat is not None
+                        else 0.0
+                    ),
+                    mastery_state=(
+                        weakness_stat.mastery_state
+                        if weakness_stat is not None
+                        else WeaknessMasteryState.UNTRAINED
+                    ),
+                    weakness_trend=(
+                        weakness_stat.trend
+                        if weakness_stat is not None
+                        else WeaknessTrend.STABLE
+                    ),
+                    mastery_summary=(
+                        weakness_stat.summary
+                        if weakness_stat is not None
+                        else "Not trained yet."
+                    ),
                 ))
 
         ordered = sorted(
@@ -304,6 +353,45 @@ class WeaknessTrainingService:
         return after.mate_in is not None and after.mate_in > 0
 
 
+def build_training_attempt(
+    exercise: TrainingExercise,
+    feedback: TrainingMoveFeedback,
+    *,
+    attempted_at: datetime | None = None,
+) -> TrainingAttempt:
+    """Build a persisted attempt record from one evaluated exercise."""
+    attempt_time = attempted_at or datetime.now(timezone.utc)
+    return TrainingAttempt(
+        weakness_id=exercise.position.weakness_id,
+        attempted_at=attempt_time.isoformat(),
+        outcome=_feedback_outcome(feedback.label),
+        game_id=exercise.game_id,
+        reviewed_at=exercise.reviewed_at,
+        fen=exercise.position.fen,
+        ply=exercise.position.ply,
+        source_path=exercise.source_path,
+        expected_move_san=exercise.position.best_move_san,
+        expected_move_uci=exercise.position.best_move_uci,
+        original_move_san=exercise.position.played_san,
+        original_move_uci=exercise.position.played_uci,
+        submitted_move_san=feedback.played_san,
+        submitted_move_uci=feedback.played_uci,
+        cp_loss=feedback.cp_loss,
+        move_rank=feedback.move_rank,
+        phase=exercise.position.phase,
+        lesson_themes=exercise.position.lesson_themes,
+        error_motif=exercise.position.error_motif,
+    )
+
+
+def _feedback_outcome(label: TrainingFeedbackLabel) -> TrainingAttemptOutcome:
+    if label is TrainingFeedbackLabel.GOOD:
+        return TrainingAttemptOutcome.SUCCESS
+    if label is TrainingFeedbackLabel.BETTER_AVAILABLE:
+        return TrainingAttemptOutcome.PARTIAL
+    return TrainingAttemptOutcome.FAILED
+
+
 def _merge_priorities(*groups: list[object]) -> tuple[object, ...]:
     ordered: list[object] = []
     seen: set[object] = set()
@@ -362,6 +450,7 @@ def _score_position(
     theme_priority: tuple[object, ...],
     phase_priority: tuple[object, ...],
     summary_index: int,
+    weakness_stat: WeaknessProgressStat | None = None,
 ) -> tuple[int, LessonTheme | None, GamePhase | None]:
     score = _SEVERITY_SCORES.get(position.classification, 0)
     score += min(position.cp_loss, 350)
@@ -378,6 +467,9 @@ def _score_position(
 
     if focus_phase is not None:
         score += _priority_bonus(focus_phase, phase_priority, _PHASE_PRIORITY_SCORES)
+
+    if weakness_stat is not None:
+        score += weakness_stat.urgency_delta
 
     return score, focus_theme, focus_phase
 

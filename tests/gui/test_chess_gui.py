@@ -19,6 +19,7 @@ from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
 from chesslab.persistence.remote_import import RemoteGameSource
 from chesslab.persistence.review_history import TrainingPositionSummary
+from chesslab.persistence.training_history import TrainingAttemptOutcome
 from chesslab.review.batch_review import (
     BatchReviewItemResult,
     BatchReviewItemStatus,
@@ -591,6 +592,8 @@ class TestTrainingMode:
         gui = ChessGui()
         gui._review_history = MagicMock()
         gui._review_history.list_recent_reviews.return_value = []
+        gui._training_history = MagicMock()
+        gui._training_history.list_recent_attempts.return_value = []
         gui._training_service = MagicMock()
         gui._training_service.build_session.return_value = ()
         gui._show_training_unavailable = MagicMock()
@@ -599,11 +602,33 @@ class TestTrainingMode:
 
         gui._show_training_unavailable.assert_called_once()
 
+    def test_start_training_session_passes_persisted_attempts_to_builder(self) -> None:
+        gui = ChessGui()
+        gui._review_history = MagicMock()
+        gui._review_history.list_recent_reviews.return_value = ["summary"]
+        gui._training_history = MagicMock()
+        gui._training_history.list_recent_attempts.return_value = ["attempt"]
+        gui._training_service = MagicMock()
+        gui._training_service.build_session.return_value = ("exercise",)
+        gui._close_post_game_review_dialog = MagicMock()
+        gui._close_progression_dialog = MagicMock()
+        gui._enter_training_mode = MagicMock()
+
+        gui._start_training_session(sample_size=5, focus_review=None)
+
+        gui._training_service.build_session.assert_called_once_with(
+            ["summary"],
+            sample_size=5,
+            focus_review=None,
+            training_attempts=["attempt"],
+        )
+
     def test_training_feedback_updates_panel_and_status(self) -> None:
         gui = ChessGui()
         gui._in_training_mode = True
         gui._training_panel = MagicMock()
         gui._training_session = (_make_training_exercise(),)
+        gui._training_history = MagicMock()
         gui._set_status = MagicMock()
 
         feedback = TrainingMoveFeedback(
@@ -625,6 +650,9 @@ class TestTrainingMode:
             feedback,
             is_last=True,
         )
+        attempt = gui._training_history.record_attempt.call_args.args[0]
+        assert attempt.outcome is TrainingAttemptOutcome.SUCCESS
+        assert attempt.weakness_id == gui._training_session[0].position.weakness_id
         gui._set_status.assert_called_once_with("Training — good move")
 
     def test_exit_training_restores_history_without_unpacked_button_anchor(self) -> None:
@@ -674,6 +702,8 @@ class TestBatchReviewHelpers:
         )
         gui._review_history = MagicMock()
         gui._review_history.list_recent_reviews.return_value = ["summary"]
+        gui._training_history = MagicMock()
+        gui._training_history.list_recent_attempts.return_value = ["attempt"]
         gui._training_service = MagicMock()
         gui._training_service.build_session.return_value = ("exercise",)
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from chesslab.weaknesses import build_weakness_id
 from chesslab.review.game_reviewer import (
     ErrorMotif,
     GamePhase,
@@ -65,6 +66,15 @@ class TrainingPositionSummary:
     cp_loss: int
     lesson_themes: tuple[LessonTheme, ...] = ()
     error_motif: ErrorMotif = ErrorMotif.UNKNOWN
+
+    @property
+    def weakness_id(self) -> str:
+        """Stable identifier for this recurring weakness position."""
+        return build_weakness_id(
+            self.fen,
+            self.played_uci,
+            self.best_move_uci,
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Serialise the training candidate to JSON-compatible data."""

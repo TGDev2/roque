@@ -5,6 +5,7 @@ from chesslab.training.weakness_training import (
     TrainingFeedbackLabel,
     TrainingMoveFeedback,
     WeaknessTrainingService,
+    build_training_attempt,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "TrainingFeedbackLabel",
     "TrainingMoveFeedback",
     "WeaknessTrainingService",
+    "build_training_attempt",
 ]

@@ -8,6 +8,8 @@ import chess
 
 from chesslab.analysis import AnalysisResult, Evaluation, VariationInfo
 from chesslab.persistence.review_history import ReviewSummary, TrainingPositionSummary
+from chesslab.persistence.training_history import TrainingAttempt, TrainingAttemptOutcome
+from chesslab.progression.weakness_progress import WeaknessMasteryState
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
@@ -73,6 +75,34 @@ def _summary(
             for theme in LessonTheme
         },
         training_positions=positions,
+    )
+
+
+def _attempt(
+    *,
+    position: TrainingPositionSummary,
+    attempted_at: str,
+    outcome: TrainingAttemptOutcome,
+) -> TrainingAttempt:
+    return TrainingAttempt(
+        weakness_id=position.weakness_id,
+        attempted_at=attempted_at,
+        outcome=outcome,
+        game_id="game",
+        reviewed_at="2026-03-24T10:00:00+00:00",
+        fen=position.fen,
+        ply=position.ply,
+        source_path=None,
+        expected_move_san=position.best_move_san,
+        expected_move_uci=position.best_move_uci,
+        original_move_san=position.played_san,
+        original_move_uci=position.played_uci,
+        submitted_move_san="move",
+        submitted_move_uci="g1f3",
+        cp_loss=24,
+        move_rank=1 if outcome is TrainingAttemptOutcome.SUCCESS else None,
+        phase=position.phase,
+        lesson_themes=position.lesson_themes,
     )
 
 
@@ -156,6 +186,92 @@ class TestWeaknessTrainingSelection:
         assert session[0].focus_theme is LessonTheme.TURNING_POINT
         assert session[0].focus_phase is GamePhase.MIDDLEGAME
         assert "Turning point" in session[0].focus_reason
+
+    def test_build_session_deprioritises_mastered_weaknesses(self) -> None:
+        starting_fen = chess.Board().fen()
+        service = WeaknessTrainingService()
+
+        mastered = _training_position(
+            fen=starting_fen,
+            played_uci="e2e4",
+            best_move_uci="d2d4",
+            best_move_san="d4",
+            classification=MoveClassification.BLUNDER,
+            phase=GamePhase.OPENING,
+            cp_loss=260,
+            lesson_themes=(LessonTheme.PHASE_PATTERN,),
+        )
+        relapsing = _training_position(
+            fen=starting_fen,
+            played_uci="g1f3",
+            best_move_uci="e2e4",
+            best_move_san="e4",
+            classification=MoveClassification.MISTAKE,
+            phase=GamePhase.MIDDLEGAME,
+            cp_loss=180,
+            lesson_themes=(LessonTheme.TURNING_POINT,),
+        )
+
+        session = service.build_session(
+            [
+                _summary(
+                    game_id="g2",
+                    reviewed_at="2026-03-24T11:00:00+00:00",
+                    positions=(relapsing,),
+                ),
+                _summary(
+                    game_id="g1",
+                    reviewed_at="2026-03-24T10:00:00+00:00",
+                    positions=(mastered,),
+                ),
+            ],
+            sample_size=2,
+            session_size=2,
+            training_attempts=[
+                _attempt(
+                    position=mastered,
+                    attempted_at="2026-03-21T10:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.SUCCESS,
+                ),
+                _attempt(
+                    position=mastered,
+                    attempted_at="2026-03-22T10:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.SUCCESS,
+                ),
+                _attempt(
+                    position=mastered,
+                    attempted_at="2026-03-23T10:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.SUCCESS,
+                ),
+                _attempt(
+                    position=relapsing,
+                    attempted_at="2026-03-21T11:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.SUCCESS,
+                ),
+                _attempt(
+                    position=relapsing,
+                    attempted_at="2026-03-22T11:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.SUCCESS,
+                ),
+                _attempt(
+                    position=relapsing,
+                    attempted_at="2026-03-23T11:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.FAILED,
+                ),
+                _attempt(
+                    position=relapsing,
+                    attempted_at="2026-03-24T11:00:00+00:00",
+                    outcome=TrainingAttemptOutcome.FAILED,
+                ),
+            ],
+        )
+
+        assert len(session) == 2
+        assert session[0].position.played_uci == relapsing.played_uci
+        assert session[0].mastery_state is WeaknessMasteryState.RELAPSING
+        assert session[0].attempt_count == 4
+        assert "repeating" in session[0].mastery_summary.lower()
+        assert session[1].mastery_state is WeaknessMasteryState.MASTERED
 
 
 @dataclass

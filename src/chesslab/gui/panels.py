@@ -14,7 +14,12 @@ import chess
 
 from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
-from chesslab.progression import ProgressionSnapshot, ProgressionTrendPoint
+from chesslab.progression import (
+    ProgressionSnapshot,
+    ProgressionTrendPoint,
+    WeaknessMasteryState,
+    WeaknessTrend,
+)
 from chesslab.review.game_reviewer import (
     ErrorMotif,
     GamePhase,
@@ -112,6 +117,23 @@ _TRAINING_FEEDBACK_LABELS: dict[TrainingFeedbackLabel, str] = {
     TrainingFeedbackLabel.GOOD: "Good move",
     TrainingFeedbackLabel.BETTER_AVAILABLE: "There was better",
     TrainingFeedbackLabel.SIGNIFICANT_ERROR: "Significant error",
+}
+_WEAKNESS_STATE_LABELS: dict[WeaknessMasteryState, str] = {
+    WeaknessMasteryState.UNTRAINED: "Not trained",
+    WeaknessMasteryState.ACTIVE: "Still fragile",
+    WeaknessMasteryState.IMPROVING: "Improving",
+    WeaknessMasteryState.MASTERED: "Mastered",
+    WeaknessMasteryState.RELAPSING: "Repeating",
+}
+_WEAKNESS_TREND_LABELS: dict[WeaknessTrend, str] = {
+    WeaknessTrend.IMPROVING: "Improving",
+    WeaknessTrend.STABLE: "Stable",
+    WeaknessTrend.REPEATING: "Repeating",
+}
+_WEAKNESS_TREND_COLORS: dict[WeaknessTrend, str] = {
+    WeaknessTrend.IMPROVING: _EVAL_POSITIVE,
+    WeaknessTrend.STABLE: _FG,
+    WeaknessTrend.REPEATING: _EVAL_NEGATIVE,
 }
 
 
@@ -1269,7 +1291,12 @@ class TrainingPanel(tk.Frame):
             text=f"{side} to move. Play the move you would choose.",
         )
         self._focus_label.config(text=exercise.focus_reason)
-        self._source_label.config(text=f"From your review history on {reviewed_date}.")
+        self._source_label.config(
+            text=(
+                f"From your review history on {reviewed_date}. "
+                f"{exercise.mastery_summary}"
+            ),
+        )
         self._context_label.config(
             text=(
                 f"In the original game, {exercise.position.played_san} was marked as a "
@@ -1400,6 +1427,13 @@ class ProgressionPanel(tk.Frame):
 
         if not snapshot.has_enough_games:
             self._render_empty_state(snapshot)
+            if snapshot.tracked_weaknesses:
+                self._divider()
+                self._render_training_follow_up(snapshot)
+                self._divider()
+                self._render_urgent_weaknesses(snapshot)
+                self._divider()
+                self._render_training_themes(snapshot)
             return
 
         self._render_classifications(snapshot)
@@ -1411,6 +1445,12 @@ class ProgressionPanel(tk.Frame):
         self._render_error_motifs(snapshot)
         self._divider()
         self._render_error_phases(snapshot)
+        self._divider()
+        self._render_training_follow_up(snapshot)
+        self._divider()
+        self._render_urgent_weaknesses(snapshot)
+        self._divider()
+        self._render_training_themes(snapshot)
 
     def _render_empty_state(self, snapshot: ProgressionSnapshot) -> None:
         tk.Label(
@@ -1433,7 +1473,8 @@ class ProgressionPanel(tk.Frame):
             self._content,
             text=(
                 "Run more post-game reviews to track recurring lessons, error "
-                "motifs, error phases, and whether your average centipawn loss is trending down."
+                "motifs, error phases, whether your average centipawn loss is trending down, "
+                "and how your targeted practice is holding up."
             ),
             bg=_CARD_BG,
             fg=_FG_DIM,
@@ -1554,6 +1595,100 @@ class ProgressionPanel(tk.Frame):
             self._metric_row(
                 label=_PHASE_LABELS[stat.phase],
                 value=f"{stat.percentage:.1f}%  ({stat.count})",
+            )
+
+    def _render_training_follow_up(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Training follow-up")
+
+        trend_colour = _FG
+        if snapshot.relapsing_weaknesses:
+            trend_colour = _EVAL_NEGATIVE
+        elif snapshot.mastered_weaknesses:
+            trend_colour = _EVAL_POSITIVE
+
+        tk.Label(
+            self._content,
+            text=(
+                f"{snapshot.tracked_weaknesses} tracked weakness"
+                f"{'' if snapshot.tracked_weaknesses == 1 else 'es'}  |  "
+                f"{snapshot.training_attempt_count} attempt"
+                f"{'' if snapshot.training_attempt_count == 1 else 's'}  |  "
+                f"{snapshot.training_success_rate:.0f}% good answers"
+            ),
+            bg=_CARD_BG,
+            fg=trend_colour,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+        self._metric_row(
+            label="Mastered weaknesses",
+            value=str(snapshot.mastered_weaknesses),
+        )
+        self._metric_row(
+            label="Not mastered yet",
+            value=str(max(0, snapshot.tracked_weaknesses - snapshot.mastered_weaknesses)),
+        )
+        self._metric_row(
+            label="Repeating lately",
+            value=str(snapshot.relapsing_weaknesses),
+        )
+
+    def _render_urgent_weaknesses(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Weaknesses to revisit")
+        if not snapshot.urgent_weaknesses:
+            tk.Label(
+                self._content,
+                text="No urgent weakness stands out in this sample right now.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x")
+            return
+
+        for stat in snapshot.urgent_weaknesses:
+            self._metric_row(
+                label=stat.label,
+                value=(
+                    f"{_WEAKNESS_STATE_LABELS[stat.mastery_state]}  |  "
+                    f"{stat.attempt_count} attempt"
+                    f"{'' if stat.attempt_count == 1 else 's'}  |  "
+                    f"{stat.success_rate:.0f}%"
+                ),
+                label_fg=_WEAKNESS_TREND_COLORS[stat.trend],
+            )
+
+    def _render_training_themes(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Practice by theme")
+        if not snapshot.training_themes:
+            tk.Label(
+                self._content,
+                text="No lesson theme has enough reusable training positions yet.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x")
+            return
+
+        for stat in snapshot.training_themes:
+            attempt_text = (
+                "No attempts yet"
+                if stat.attempt_count == 0
+                else f"{stat.success_rate:.0f}% good"
+            )
+            self._metric_row(
+                label=_THEME_LABELS[stat.theme],
+                value=(
+                    f"{_WEAKNESS_TREND_LABELS[stat.trend]}  |  "
+                    f"{stat.urgent_count} urgent  |  {attempt_text}"
+                ),
+                label_fg=_WEAKNESS_TREND_COLORS[stat.trend],
             )
 
     def _draw_sparkline(
