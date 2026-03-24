@@ -28,12 +28,13 @@ def test_official_profile_has_thresholds() -> None:
     assert profile.dataset_thresholds is not None
 
 
-def test_black_candidate_profile_is_backed_by_real_dataset() -> None:
+def test_black_official_profile_is_backed_by_real_dataset() -> None:
     catalog = load_support_catalog()
     profile = catalog.get_profile("chesscom_green_black")
 
     assert profile is not None
-    assert profile.is_official is False
+    assert profile.is_official is True
+    assert profile.is_recommended is True
     assert profile.uses_real_templates is True
     assert profile.has_real_dataset is True
     assert profile.dataset_thresholds is not None

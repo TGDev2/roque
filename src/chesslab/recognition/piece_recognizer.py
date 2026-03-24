@@ -128,6 +128,21 @@ _KEY_TO_PIECE: dict[str, PieceType] = {
 
 _PIECE_TO_KEY: dict[PieceType, str] = {v: k for k, v in _KEY_TO_PIECE.items()}
 
+_COLOR_SWAP: dict[PieceType, PieceType] = {
+    PieceType.WHITE_KING: PieceType.BLACK_KING,
+    PieceType.WHITE_QUEEN: PieceType.BLACK_QUEEN,
+    PieceType.WHITE_ROOK: PieceType.BLACK_ROOK,
+    PieceType.WHITE_BISHOP: PieceType.BLACK_BISHOP,
+    PieceType.WHITE_KNIGHT: PieceType.BLACK_KNIGHT,
+    PieceType.WHITE_PAWN: PieceType.BLACK_PAWN,
+    PieceType.BLACK_KING: PieceType.WHITE_KING,
+    PieceType.BLACK_QUEEN: PieceType.WHITE_QUEEN,
+    PieceType.BLACK_ROOK: PieceType.WHITE_ROOK,
+    PieceType.BLACK_BISHOP: PieceType.WHITE_BISHOP,
+    PieceType.BLACK_KNIGHT: PieceType.WHITE_KNIGHT,
+    PieceType.BLACK_PAWN: PieceType.WHITE_PAWN,
+}
+
 
 def _parse_template_key(key: str) -> tuple[PieceType, str]:
     """Parse a manifest key like ``'wK_light'`` into ``(PieceType, background)``.
@@ -166,6 +181,7 @@ class PieceRecognizer:
     _FOREGROUND_DISTANCE_THRESHOLD: float = 20.0
     _BACKGROUND_NORMALIZATION_DISTANCE_THRESHOLD: float = 28.0
     _LABEL_CLEANUP_DISTANCE_THRESHOLD: float = 10.0
+    _PIECE_COLOR_LUMINANCE_THRESHOLD: float = 147.0
 
     def __init__(self, config: RecognitionConfig | None = None) -> None:
         self._config = config or RecognitionConfig()
@@ -176,6 +192,7 @@ class PieceRecognizer:
             "light": {},
             "dark": {},
         }
+        self._synthetic = False
         self._load_theme(self._config.theme)
         self._canonical_backgrounds = self._estimate_canonical_backgrounds()
 
@@ -293,6 +310,9 @@ class PieceRecognizer:
                 if low_confidence:
                     uncertain_names.append(name)
 
+        if not self._synthetic:
+            classifications = self._verify_piece_colors(classifications, squares)
+
         elapsed = (time.perf_counter() - start) * 1000
 
         uncertain = len(uncertain_names) > 0
@@ -310,6 +330,83 @@ class PieceRecognizer:
             uncertain=uncertain,
             uncertain_squares=tuple(uncertain_names),
         )
+
+    # -- Post-hoc colour verification ----------------------------------------
+
+    def _verify_piece_colors(
+        self,
+        classifications: dict[str, SquareClassification],
+        squares: dict[str, SquareImage],
+    ) -> dict[str, SquareClassification]:
+        """Correct piece colour using absolute foreground luminance.
+
+        Template matching may assign the wrong colour when the piece occupies
+        a different physical board position than the template source (e.g.
+        black perspective vs white perspective).  The shape match is reliable
+        but the colour can be verified independently: white pieces have a
+        high luminance (~190–220) and black pieces a low one (~80–110).
+
+        Only non-empty, non-low-confidence classifications are corrected.
+        """
+        corrected: dict[str, SquareClassification] = {}
+        swaps = 0
+        for name, cls in classifications.items():
+            if cls.piece is PieceType.EMPTY or cls.low_confidence:
+                corrected[name] = cls
+                continue
+
+            square = squares[name]
+            lum_color = self._luminance_color(square)
+            if lum_color is None:
+                corrected[name] = cls
+                continue
+
+            is_white_piece = cls.piece.value.isupper()
+            lum_says_white = lum_color == "w"
+            if is_white_piece != lum_says_white:
+                swapped = _COLOR_SWAP[cls.piece]
+                corrected[name] = SquareClassification(
+                    square_name=name,
+                    piece=swapped,
+                    confidence=cls.confidence,
+                    low_confidence=cls.low_confidence,
+                )
+                swaps += 1
+            else:
+                corrected[name] = cls
+
+        if swaps:
+            logger.debug(
+                "Colour verification corrected %d square(s).", swaps,
+            )
+        return corrected
+
+    def _luminance_color(
+        self,
+        square: SquareImage,
+    ) -> str | None:
+        """Return ``'w'`` or ``'b'`` based on the centre-region luminance.
+
+        Uses the inner ~30 % of the square image (by each dimension) to
+        isolate the piece body from the board background and any move
+        highlights that chess sites may render.
+
+        Returns ``None`` when the centre crop is too small to be reliable.
+        """
+        bgr = self._ensure_bgr(square.image)
+        h, w = bgr.shape[:2]
+        margin = max(1, int(0.35 * min(h, w)))
+        centre = bgr[margin : h - margin, margin : w - margin]
+        if centre.size < 30:
+            return None
+
+        # BT.601 luminance (BGR channel order)
+        luminance = (
+            0.114 * centre[:, :, 0].astype(np.float32)
+            + 0.587 * centre[:, :, 1].astype(np.float32)
+            + 0.299 * centre[:, :, 2].astype(np.float32)
+        )
+        return "w" if float(luminance.mean()) > self._PIECE_COLOR_LUMINANCE_THRESHOLD else "b"
 
     # -- Theme loading ------------------------------------------------------
 
@@ -341,7 +438,8 @@ class PieceRecognizer:
                 f"Failed to read theme manifest: {manifest_path}.",
             ) from exc
 
-        if manifest.get("synthetic", False):
+        self._synthetic = bool(manifest.get("synthetic", False))
+        if self._synthetic:
             logger.warning(
                 "Theme '%s' uses synthetic templates — recognition accuracy "
                 "will be low. Run 'python -m chesslab.extract' with a real "
@@ -621,13 +719,20 @@ class PieceRecognizer:
         square: SquareImage,
         source_background: NDArray[np.uint8],
     ) -> None:
-        """Remove chess.com coordinate overlays from known board corners."""
+        """Remove chess.com coordinate overlays from known board edges.
+
+        In white perspective labels appear on file a (``file==0``) and rank 1
+        (``rank==0``).  In black perspective they shift to file h
+        (``file==7``) and rank 8 (``rank==7``).  Both pairs are handled so
+        the recogniser works regardless of perspective.
+        """
         h, w = image.shape[:2]
         if min(h, w) < 64:
             return
         background = source_background.astype(np.float32)
 
-        if square.file == 0:
+        # Rank-number labels: top-left corner of the leftmost visual column.
+        if square.file in (0, 7):
             zone = image[: max(1, h // 4), : max(1, w // 6)]
             distance = np.linalg.norm(
                 zone.astype(np.float32) - background,
@@ -637,7 +742,8 @@ class PieceRecognizer:
             if float(foreground.mean()) <= 0.20:
                 zone[foreground] = source_background
 
-        if square.rank == 0:
+        # File-letter labels: bottom-right corner of the bottom visual row.
+        if square.rank in (0, 7):
             zone = image[h - max(1, h // 4) :, w - max(1, w // 6) :]
             distance = np.linalg.norm(
                 zone.astype(np.float32) - background,

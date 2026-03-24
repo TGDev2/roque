@@ -54,13 +54,12 @@ def test_list_options_prioritizes_official_profiles_and_hides_synthetic_setups()
     options = assistant.list_options()
 
     assert options
-    assert options[0].profile_id == "chesscom_green_white"
     assert options[0].support_label == "OFFICIAL"
     assert options[0].recommended is True
-    assert [option.profile_id for option in options] == [
+    assert {option.profile_id for option in options} == {
         "chesscom_green_white",
         "chesscom_green_black",
-    ]
+    }
     assert all(option.template_quality == "real" for option in options)
 
 
@@ -75,7 +74,7 @@ def test_build_observer_config_uses_declared_profile() -> None:
     assert config.white_perspective is False
     assert config.enable_game_tracking is True
     assert config.setup_id == "chesscom_green_black"
-    assert config.support_level == "candidate"
+    assert config.support_level == "official"
 
 
 def test_capture_preflight_frames_uses_monitor_and_min_interval() -> None:

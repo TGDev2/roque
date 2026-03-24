@@ -170,6 +170,7 @@ def _make_synthetic_theme(tmp_path: Path, size: int = SIZE) -> Path:
     manifest = {
         "name": "test_theme",
         "description": "Synthetic test theme",
+        "synthetic": True,
         "templates": templates,
     }
     with (theme_dir / "theme.json").open("w") as fh:

@@ -29,7 +29,7 @@ def test_validate_real_dataset_returns_metrics() -> None:
     assert result.passed is True
 
 
-def test_black_candidate_real_dataset_surfaces_evidence_backed_failures() -> None:
+def test_black_official_real_dataset_passes() -> None:
     catalog = load_support_catalog()
     manifest = Path("tests/integration/fixtures/real_setups_manifest.json")
 
@@ -42,12 +42,11 @@ def test_black_candidate_real_dataset_surfaces_evidence_backed_failures() -> Non
     assert len(results) == 1
     result = results[0]
     assert result.setup_id == "chesscom_green_black"
-    assert result.support_level == "candidate"
+    assert result.support_level == "official"
     assert result.metrics.sample_count >= 1
-    assert result.passed is False
-    assert (
-        "No dataset thresholds configured for this setup in support catalog."
-        not in result.failures
-    )
-    assert any("Ready frame rate too low" in failure for failure in result.failures)
-    assert any("Invalid frame rate too high" in failure for failure in result.failures)
+    assert result.metrics.detection_rate >= 0.9
+    assert result.metrics.mean_iou >= 0.9
+    assert result.metrics.theme_match_rate >= 0.85
+    assert result.metrics.ready_rate >= 0.60
+    assert result.metrics.uncertain_rate <= 0.30
+    assert result.passed is True
