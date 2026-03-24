@@ -163,10 +163,12 @@ class TestMain:
                 main()
             assert exc_info.value.code == 1
 
+    @patch("chesslab.review.__main__.ReviewHistoryStorage")
     @patch("chesslab.review.__main__.GameReviewer")
     def test_success_prints_output(
         self,
         mock_reviewer_cls: MagicMock,
+        mock_history_cls: MagicMock,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -190,3 +192,4 @@ class TestMain:
         captured = capsys.readouterr()
         assert "Alice" in captured.out
         assert "Bob" in captured.out
+        mock_history_cls.return_value.record_review.assert_called_once()

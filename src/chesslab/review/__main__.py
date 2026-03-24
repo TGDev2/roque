@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from chesslab.persistence.game_storage import GameStorage, PersistenceError
+from chesslab.persistence.review_history import ReviewHistoryStorage
 from chesslab.review.game_reviewer import (
     GameReview,
     GameReviewer,
@@ -182,6 +183,16 @@ def main() -> None:
         sys.exit(1)
 
     print(file=sys.stderr)  # newline after progress
+    try:
+        ReviewHistoryStorage().record_review(
+            review,
+            source_path=record.file_path,
+        )
+    except PersistenceError as exc:
+        print(
+            f"Warning: failed to save review summary: {exc}",
+            file=sys.stderr,
+        )
     print(_format_review(review, record.headers))
 
 

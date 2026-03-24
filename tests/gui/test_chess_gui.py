@@ -44,16 +44,19 @@ class TestGuiConfig:
         assert config.square_size == 64
         assert config.startup_mode is None
         assert config.startup_review_file is None
+        assert config.progression_sample_size == 20
 
     def test_custom_values(self) -> None:
         config = GuiConfig(
             player_color=PlayerColor.BLACK,
             analysis=AnalysisConfig(depth=22),
             square_size=72,
+            progression_sample_size=30,
         )
         assert config.player_color == PlayerColor.BLACK
         assert config.analysis.depth == 22
         assert config.square_size == 72
+        assert config.progression_sample_size == 30
 
     def test_supports_forced_startup_mode(self) -> None:
         config = GuiConfig(startup_mode=StartupJourneyMode.OBSERVE_LIVE)
@@ -63,6 +66,10 @@ class TestGuiConfig:
         """When player_color is None, a dialog should be shown."""
         config = GuiConfig()
         assert config.player_color is None
+
+    def test_supports_progression_startup_mode(self) -> None:
+        config = GuiConfig(startup_mode=StartupJourneyMode.PROGRESSION)
+        assert config.startup_mode is StartupJourneyMode.PROGRESSION
 
 
 def _make_report(*, passed: bool) -> CalibrationReport:
@@ -297,6 +304,7 @@ class TestObserveLiveHelpers:
     def test_review_complete_wires_lesson_navigation(self) -> None:
         gui = ChessGui()
         gui._close_progress_dialog = MagicMock()
+        gui._save_review_summary = MagicMock(return_value=True)
         gui._play_mode_widgets = [MagicMock()]
         gui._entry_frame = MagicMock()
         gui._review_panel = MagicMock()
@@ -315,3 +323,13 @@ class TestObserveLiveHelpers:
         callback(0)
 
         gui._review_navigate_to.assert_called_with(1)
+
+    def test_apply_startup_mode_progression_opens_dashboard(self) -> None:
+        gui = ChessGui()
+        gui._root = MagicMock()
+        gui._set_status = MagicMock()
+        gui._show_progression_dialog = MagicMock()
+
+        gui._apply_startup_mode(StartupJourneyMode.PROGRESSION)
+
+        gui._show_progression_dialog.assert_called_once()

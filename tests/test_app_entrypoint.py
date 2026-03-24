@@ -33,6 +33,17 @@ def test_mode_maps_to_startup_mode(mock_gui_cls: MagicMock) -> None:
 
 
 @patch("chesslab.app.ChessGui")
+def test_progression_mode_maps_to_startup_mode(mock_gui_cls: MagicMock) -> None:
+    mock_gui_cls.return_value.run.return_value = None
+
+    exit_code = main(["--mode", "progression"])
+
+    assert exit_code == 0
+    config = mock_gui_cls.call_args.args[0]
+    assert config.startup_mode is StartupJourneyMode.PROGRESSION
+
+
+@patch("chesslab.app.ChessGui")
 def test_review_file_forces_direct_review_mode(mock_gui_cls: MagicMock) -> None:
     mock_gui_cls.return_value.run.return_value = None
 

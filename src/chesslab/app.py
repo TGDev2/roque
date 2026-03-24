@@ -15,6 +15,7 @@ from chesslab.product_usage import PRODUCT_BOUNDARY, PRODUCT_SCOPE
 _MODE_MAP: dict[str, StartupJourneyMode] = {
     "manual": StartupJourneyMode.MANUAL_COACH,
     "observe": StartupJourneyMode.OBSERVE_LIVE,
+    "progression": StartupJourneyMode.PROGRESSION,
     "review-recent": StartupJourneyMode.REVIEW_RECENT,
     "review-paste": StartupJourneyMode.REVIEW_PASTE,
 }

@@ -9,11 +9,19 @@ from chesslab.persistence.game_storage import (
     PersistenceError,
     build_headers,
 )
+from chesslab.persistence.review_history import (
+    ReviewHistoryStorage,
+    ReviewSummary,
+    build_review_summary,
+)
 
 __all__ = [
     "GameRecord",
     "GameStorage",
     "GameSummary",
     "PersistenceError",
+    "ReviewHistoryStorage",
+    "ReviewSummary",
     "build_headers",
+    "build_review_summary",
 ]

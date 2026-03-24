@@ -31,6 +31,7 @@ from tkinter import filedialog
 import chess
 
 from chesslab.persistence.game_storage import GameRecord, GameStorage, build_headers
+from chesslab.persistence.review_history import ReviewHistoryStorage
 
 from chesslab.analysis import AnalysisConfig, ContinuousAnalysisHandle
 from chesslab.coach.game_coach import (
@@ -50,6 +51,7 @@ from chesslab.capture.screen_capture import (
     MonitorSelectionError,
     ScreenCaptureError,
 )
+from chesslab.progression import ProgressTracker
 from chesslab.gui.board_widget import BoardWidget
 from chesslab.gui.live_setup_assistant import LiveSetupAssistant
 from chesslab.gui.live_observer import (
@@ -65,6 +67,7 @@ from chesslab.gui.panels import (
     GameSummaryPanel,
     MoveHistoryPanel,
     ObserveLivePanel,
+    ProgressionPanel,
     ReviewNavigationPanel,
     ReviewPanel,
     SuggestionsPanel,
@@ -185,6 +188,7 @@ class StartupJourneyMode(enum.Enum):
 
     MANUAL_COACH = "manual_coach"
     OBSERVE_LIVE = "observe_live"
+    PROGRESSION = "progression"
     REVIEW_RECENT = "review_recent"
     REVIEW_PASTE = "review_paste"
     REVIEW_FILE = "review_file"
@@ -209,6 +213,8 @@ class GuiConfig:
     startup_review_file:
         Optional PGN file to review immediately when ``startup_mode`` is
         :attr:`StartupJourneyMode.REVIEW_FILE`.
+    progression_sample_size:
+        Default sample window for the progression dashboard.
     """
 
     player_color: PlayerColor | None = None
@@ -216,6 +222,7 @@ class GuiConfig:
     square_size: int = 64
     startup_mode: StartupJourneyMode | None = None
     startup_review_file: Path | None = None
+    progression_sample_size: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +256,11 @@ class ChessGui:
 
         # Persistence.
         self._storage = GameStorage()
+        self._review_history = ReviewHistoryStorage()
+        self._progress_tracker = ProgressTracker(self._review_history)
         self._game_saved: bool = False
+        self._current_game_file: Path | None = None
+        self._progression_sample_size = max(3, self._config.progression_sample_size)
 
         # Review mode state.
         self._from_observation: bool = False
@@ -279,6 +290,7 @@ class ChessGui:
         self._review_panel: ReviewPanel | None = None
         self._review_nav: ReviewNavigationPanel | None = None
         self._summary_panel: GameSummaryPanel | None = None
+        self._progression_panel: ProgressionPanel | None = None
 
         # Play mode widget groups (for hiding/showing during review).
         self._play_mode_widgets: list[tk.Widget] = []
@@ -288,8 +300,11 @@ class ChessGui:
         self._btn_frame: tk.Frame | None = None
         self._new_game_btn: tk.Button | None = None
         self._pgn_frame: tk.Frame | None = None
+        self._progression_btn: tk.Button | None = None
         self._entry_frame: tk.Frame | None = None
         self._submit_btn: tk.Button | None = None
+        self._progression_dialog: tk.Toplevel | None = None
+        self._progression_limit_var: tk.IntVar | None = None
 
     def run(self) -> None:
         """Build the window and enter the tkinter mainloop (blocking)."""
@@ -307,6 +322,7 @@ class ChessGui:
         player_color = self._config.player_color
         if player_color is None:
             if startup_mode in {
+                StartupJourneyMode.PROGRESSION,
                 StartupJourneyMode.REVIEW_RECENT,
                 StartupJourneyMode.REVIEW_PASTE,
                 StartupJourneyMode.REVIEW_FILE,
@@ -447,6 +463,15 @@ class ChessGui:
                 StartupJourneyMode.OBSERVE_LIVE,
             ),
             (
+                "Progression",
+                (
+                    "Open your learning profile built from recent reviews: move "
+                    "quality mix, centipawn-loss trend, recurring lesson themes, "
+                    "and where your errors happen most often."
+                ),
+                StartupJourneyMode.PROGRESSION,
+            ),
+            (
                 "Review Recent",
                 review_journey.launcher_summary,
                 StartupJourneyMode.REVIEW_RECENT,
@@ -528,6 +553,11 @@ class ChessGui:
             config = self._show_observe_dialog(self._root)
             if config is not None:
                 self._start_observation(config)
+            return
+
+        if mode is StartupJourneyMode.PROGRESSION:
+            self._set_status("Progression — review your recent learning trends.")
+            self._show_progression_dialog()
             return
 
         if mode is StartupJourneyMode.REVIEW_RECENT:
@@ -787,6 +817,14 @@ class ChessGui:
             font=("sans-serif", 10),
         )
         self._new_game_btn.pack(fill="x", pady=(0, 4))
+
+        self._progression_btn = _styled_button(
+            panel_frame,
+            text="Progression",
+            command=self._show_progression_dialog,
+            font=("sans-serif", 10, "bold"),
+        )
+        self._progression_btn.pack(fill="x", pady=(0, 4))
 
         # PGN buttons row.
         self._pgn_frame = tk.Frame(panel_frame, bg=_BG)
@@ -2448,6 +2486,7 @@ class ChessGui:
             self._coach.stop()
 
         self._game_saved = False
+        self._current_game_file = None
 
         # Clear queue.
         while not self._update_queue.empty():
@@ -2501,6 +2540,24 @@ class ChessGui:
         logger.info("ChessLab GUI closed.")
 
     # -- Persistence ---------------------------------------------------------
+
+    def _save_review_summary(self, review: GameReview) -> bool:
+        """Persist a lightweight summary for longitudinal progression."""
+        try:
+            self._review_history.record_review(
+                review,
+                source_path=self._current_game_file,
+            )
+        except Exception:
+            logger.exception("Failed to persist review summary.")
+            return False
+
+        if (
+            self._progression_dialog is not None
+            and self._progression_dialog.winfo_exists()
+        ):
+            self._refresh_progression_panel()
+        return True
 
     def _build_headers(self) -> dict[str, str]:
         """Build PGN headers from the current game state."""
@@ -2561,6 +2618,7 @@ class ChessGui:
             path = self._storage.save_game(board, self._build_headers())
             if path is not None:
                 self._game_saved = True
+                self._current_game_file = path
                 logger.info("Auto-saved game: %s", path)
         except Exception:
             logger.exception("Failed to auto-save game.")
@@ -2614,6 +2672,7 @@ class ChessGui:
 
         self._coach.load_board(record.board)
         self._game_saved = True  # Loaded game doesn't need re-saving.
+        self._current_game_file = record.file_path
 
         self._best_move_uci = None
         self._current_handle = None
@@ -2752,6 +2811,155 @@ class ChessGui:
         ) // 2
         dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
 
+    def _show_progression_dialog(self) -> None:
+        """Show the cross-session progression dashboard."""
+        assert self._root is not None
+
+        if (
+            self._progression_dialog is not None
+            and self._progression_dialog.winfo_exists()
+        ):
+            self._progression_dialog.deiconify()
+            self._progression_dialog.lift()
+            self._progression_dialog.focus_force()
+            self._refresh_progression_panel()
+            return
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title("Progression")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_progression_dialog)
+        self._progression_dialog = dialog
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        title_row = tk.Frame(container, bg=_BG)
+        title_row.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            title_row,
+            text="Progression",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 16, "bold"),
+            anchor="w",
+        ).pack(side="left")
+
+        controls = tk.Frame(container, bg=_BG)
+        controls.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            controls,
+            text="Last",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left")
+
+        self._progression_limit_var = tk.IntVar(value=self._progression_sample_size)
+        limit_spin = tk.Spinbox(
+            controls,
+            from_=3,
+            to=100,
+            width=5,
+            textvariable=self._progression_limit_var,
+            justify="center",
+            bg=_ENTRY_BG,
+            fg=_ENTRY_FG,
+            buttonbackground=_BTN_BG,
+            insertbackground=_FG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=("monospace", 10),
+        )
+        limit_spin.pack(side="left", padx=(6, 6))
+        limit_spin.bind("<Return>", lambda _event: self._refresh_progression_panel())
+        limit_spin.bind("<FocusOut>", lambda _event: self._refresh_progression_panel())
+
+        tk.Label(
+            controls,
+            text="reviewed games",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left")
+
+        _styled_button(
+            controls,
+            text="Refresh",
+            command=self._refresh_progression_panel,
+            font=("sans-serif", 9, "bold"),
+            padx=10,
+            pady=4,
+        ).pack(side="right")
+
+        self._progression_panel = ProgressionPanel(container)
+        self._progression_panel.pack(fill="both", expand=True)
+
+        footer = tk.Frame(container, bg=_BG)
+        footer.pack(fill="x", pady=(10, 0))
+        _styled_button(
+            footer,
+            text="Close",
+            command=self._close_progression_dialog,
+            font=("sans-serif", 10),
+        ).pack(side="right")
+
+        self._refresh_progression_panel()
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _refresh_progression_panel(self) -> None:
+        """Reload the progression snapshot from persisted review summaries."""
+        if self._progression_panel is None:
+            return
+
+        limit = self._coerce_progression_limit()
+        try:
+            snapshot = self._progress_tracker.build_snapshot(limit=limit)
+        except Exception as exc:
+            logger.exception("Failed to build progression snapshot.")
+            self._progression_panel.show_error(
+                f"Could not load progression data: {exc}",
+            )
+            return
+
+        self._progression_panel.update_snapshot(snapshot)
+
+    def _close_progression_dialog(self) -> None:
+        """Close the progression dashboard dialog."""
+        if self._progression_dialog is not None:
+            self._progression_dialog.destroy()
+        self._progression_dialog = None
+        self._progression_panel = None
+        self._progression_limit_var = None
+
+    def _coerce_progression_limit(self) -> int:
+        """Return the selected progression sample size."""
+        if self._progression_limit_var is None:
+            return self._progression_sample_size
+
+        try:
+            limit = int(self._progression_limit_var.get())
+        except (tk.TclError, ValueError):
+            limit = self._progression_sample_size
+
+        limit = max(3, min(limit, 100))
+        self._progression_sample_size = limit
+        self._progression_limit_var.set(limit)
+        return limit
+
     # -- Review mode ---------------------------------------------------------
 
     def _on_review_current(self) -> None:
@@ -2791,6 +2999,7 @@ class ChessGui:
         self._auto_save()
         self._coach.load_board(record.board)
         self._game_saved = True
+        self._current_game_file = record.file_path
 
         self._start_review(record.board)
 
@@ -3051,6 +3260,7 @@ class ChessGui:
         self._close_progress_dialog()
         self._game_review = review
         self._in_review_mode = True
+        progression_saved = self._save_review_summary(review)
 
         # Hide play-mode widgets, show review-mode widgets.
         for w in self._play_mode_widgets:
@@ -3088,7 +3298,9 @@ class ChessGui:
 
         self._set_status(
             f"Review mode \u2014 post-game analysis for {len(review.moves)} moves "
-            f"in {review.total_elapsed_ms / 1000:.1f}s",
+            f"in {review.total_elapsed_ms / 1000:.1f}s"
+            f"{'' if progression_saved else ' (progression update failed)'}",
+            error=not progression_saved,
         )
         logger.info(
             "Review complete: %d moves, %.1fs",

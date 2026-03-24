@@ -12,9 +12,11 @@ from typing import Callable
 
 from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
+from chesslab.progression import ProgressionSnapshot, ProgressionTrendPoint
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
+    LessonTheme,
     MoveClassification,
     ReviewLesson,
     ReviewedMove,
@@ -66,6 +68,19 @@ _CLS_LABELS: dict[MoveClassification, str] = {
 }
 _HIGHLIGHT_BG = "#2a3a4c"
 _LESSON_BG = "#23283a"
+_TREND_LINE = "#80cbc4"
+_TREND_POINT = "#26a69a"
+
+_THEME_LABELS: dict[LessonTheme, str] = {
+    LessonTheme.PHASE_PATTERN: "Phase pattern",
+    LessonTheme.TURNING_POINT: "Turning point",
+    LessonTheme.ADVANTAGE_MANAGEMENT: "Advantage management",
+}
+_PHASE_LABELS: dict[GamePhase, str] = {
+    GamePhase.OPENING: "Opening",
+    GamePhase.MIDDLEGAME: "Middlegame",
+    GamePhase.ENDGAME: "Endgame",
+}
 
 
 def _card_frame(parent: tk.Widget, **kwargs: object) -> tk.Frame:
@@ -960,3 +975,334 @@ class GameSummaryPanel(tk.Frame):
         if lesson.phase is not None:
             return lesson.phase.value.capitalize()
         return "position"
+
+
+# ---------------------------------------------------------------------------
+# Progression panel
+# ---------------------------------------------------------------------------
+
+
+class ProgressionPanel(tk.Frame):
+    """Displays longitudinal metrics across persisted game reviews."""
+
+    def __init__(self, parent: tk.Widget) -> None:
+        super().__init__(parent, bg=_BG)
+
+        card = _card_frame(self)
+        card.pack(fill="both", expand=True)
+        self._inner = card._inner  # type: ignore[attr-defined]
+
+        header = tk.Frame(self._inner, bg=_CARD_BG)
+        header.pack(fill="x", padx=10, pady=(8, 4))
+
+        tk.Label(
+            header,
+            text="PROGRESSION",
+            bg=_CARD_BG,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(side="left")
+
+        self._sample_label = tk.Label(
+            header,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="e",
+        )
+        self._sample_label.pack(side="right")
+
+        self._content = tk.Frame(self._inner, bg=_CARD_BG)
+        self._content.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+    def show_error(self, message: str) -> None:
+        """Display a storage or aggregation error message."""
+        self._sample_label.config(text="Unavailable")
+        self._clear_content()
+        tk.Label(
+            self._content,
+            text=message,
+            bg=_CARD_BG,
+            fg=_EVAL_NEGATIVE,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+    def update_snapshot(self, snapshot: ProgressionSnapshot) -> None:
+        """Render a progression snapshot."""
+        self._clear_content()
+        self._sample_label.config(
+            text=f"{snapshot.analysed_games} games / window {snapshot.sample_size}",
+        )
+
+        if not snapshot.has_enough_games:
+            self._render_empty_state(snapshot)
+            return
+
+        self._render_classifications(snapshot)
+        self._divider()
+        self._render_cp_loss_trend(snapshot)
+        self._divider()
+        self._render_themes(snapshot)
+        self._divider()
+        self._render_error_phases(snapshot)
+
+    def _render_empty_state(self, snapshot: ProgressionSnapshot) -> None:
+        tk.Label(
+            self._content,
+            text=(
+                f"Analyse at least {snapshot.minimum_games} games to unlock the "
+                f"progression dashboard. {snapshot.analysed_games} review"
+                f"{'' if snapshot.analysed_games == 1 else 's'} recorded so far; "
+                f"{snapshot.games_remaining} more to go."
+            ),
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 10, "bold"),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x", pady=(6, 6))
+
+        tk.Label(
+            self._content,
+            text=(
+                "Run more post-game reviews to track recurring lessons, error "
+                "phases, and whether your average centipawn loss is trending down."
+            ),
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x")
+
+    def _render_classifications(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Move classifications")
+        for cls in (
+            MoveClassification.EXCELLENT,
+            MoveClassification.GOOD,
+            MoveClassification.INACCURACY,
+            MoveClassification.MISTAKE,
+            MoveClassification.BLUNDER,
+        ):
+            count = snapshot.classification_counts.get(cls, 0)
+            percentage = snapshot.classification_percentages.get(cls, 0.0)
+            self._metric_row(
+                label=_CLS_LABELS[cls],
+                value=f"{percentage:.1f}%  ({count})",
+                label_fg=_CLS_COLORS[cls],
+            )
+
+    def _render_cp_loss_trend(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Average cp loss per game")
+
+        trend_label = "Stable"
+        trend_colour = _FG
+        if snapshot.avg_cp_loss_delta <= -10:
+            trend_label = "Improving"
+            trend_colour = _EVAL_POSITIVE
+        elif snapshot.avg_cp_loss_delta >= 10:
+            trend_label = "Worsening"
+            trend_colour = _EVAL_NEGATIVE
+
+        tk.Label(
+            self._content,
+            text=(
+                f"{trend_label}  |  sample avg {snapshot.sample_avg_cp_loss:.0f}cp  "
+                f"|  delta {snapshot.avg_cp_loss_delta:+.0f}cp"
+            ),
+            bg=_CARD_BG,
+            fg=trend_colour,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+        if not snapshot.cp_loss_trend:
+            tk.Label(
+                self._content,
+                text="No reviewed games yet.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+            ).pack(fill="x")
+            return
+
+        self._draw_sparkline(snapshot.cp_loss_trend)
+
+    def _render_themes(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Recurring lesson themes")
+        if not snapshot.top_themes:
+            tk.Label(
+                self._content,
+                text="No recurring lesson theme extracted yet in this sample.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x")
+            return
+
+        for stat in snapshot.top_themes:
+            self._metric_row(
+                label=_THEME_LABELS[stat.theme],
+                value=f"{stat.count} lesson{'s' if stat.count != 1 else ''}",
+            )
+
+    def _render_error_phases(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Errors by phase")
+        tk.Label(
+            self._content,
+            text="Errors = inaccuracies, mistakes, and blunders.",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+        for stat in snapshot.error_phases:
+            self._metric_row(
+                label=_PHASE_LABELS[stat.phase],
+                value=f"{stat.percentage:.1f}%  ({stat.count})",
+            )
+
+    def _draw_sparkline(
+        self,
+        points: tuple[ProgressionTrendPoint, ...],
+    ) -> None:
+        width = 360
+        height = 92
+        pad_x = 12
+        pad_y = 14
+        canvas = tk.Canvas(
+            self._content,
+            width=width,
+            height=height,
+            bg=_LESSON_BG,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=_CARD_BORDER,
+        )
+        canvas.pack(fill="x", pady=(0, 4))
+
+        values = [point.avg_cp_loss for point in points]
+        low = min(values)
+        high = max(values)
+        spread = high - low
+        usable_w = width - 2 * pad_x
+        usable_h = height - 2 * pad_y
+
+        coords: list[float] = []
+        for idx, value in enumerate(values):
+            x = (
+                width / 2
+                if len(values) == 1
+                else pad_x + usable_w * idx / (len(values) - 1)
+            )
+            if spread == 0:
+                y = pad_y + usable_h / 2
+            else:
+                y = pad_y + usable_h * (1 - ((value - low) / spread))
+            coords.extend([x, y])
+
+        if len(coords) >= 4:
+            canvas.create_line(*coords, fill=_TREND_LINE, width=2, smooth=True)
+
+        for idx in range(0, len(coords), 2):
+            x = coords[idx]
+            y = coords[idx + 1]
+            canvas.create_oval(
+                x - 3, y - 3, x + 3, y + 3,
+                fill=_TREND_POINT,
+                outline="",
+            )
+
+        canvas.create_text(
+            pad_x,
+            height - 8,
+            text=self._format_date(points[0].reviewed_at),
+            fill=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="sw",
+        )
+        canvas.create_text(
+            width - pad_x,
+            height - 8,
+            text=self._format_date(points[-1].reviewed_at),
+            fill=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="se",
+        )
+        canvas.create_text(
+            width - pad_x,
+            8,
+            text=f"{high:.0f}cp",
+            fill=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="ne",
+        )
+        canvas.create_text(
+            width - pad_x,
+            height - 20,
+            text=f"{low:.0f}cp",
+            fill=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="se",
+        )
+
+    def _section_title(self, text: str) -> None:
+        tk.Label(
+            self._content,
+            text=text,
+            bg=_CARD_BG,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 4))
+
+    def _metric_row(
+        self,
+        *,
+        label: str,
+        value: str,
+        label_fg: str = _FG,
+    ) -> None:
+        row = tk.Frame(self._content, bg=_CARD_BG)
+        row.pack(fill="x", pady=(0, 2))
+
+        tk.Label(
+            row,
+            text=label,
+            bg=_CARD_BG,
+            fg=label_fg,
+            font=("sans-serif", 9),
+            anchor="w",
+        ).pack(side="left")
+
+        tk.Label(
+            row,
+            text=value,
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 9, "bold"),
+            anchor="e",
+        ).pack(side="right")
+
+    def _divider(self) -> None:
+        tk.Frame(self._content, bg=_CARD_BORDER, height=1).pack(fill="x", pady=8)
+
+    def _clear_content(self) -> None:
+        for child in self._content.winfo_children():
+            child.destroy()
+
+    @staticmethod
+    def _format_date(timestamp: str) -> str:
+        return timestamp[:10]
