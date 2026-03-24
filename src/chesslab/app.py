@@ -9,16 +9,8 @@ from typing import Sequence
 
 from chesslab.analysis import EngineNotFoundError
 from chesslab.gui import ChessGui, GuiConfig, StartupJourneyMode
+from chesslab.gui.journeys import CLI_STARTUP_MODE_ALIASES
 from chesslab.product_usage import PRODUCT_BOUNDARY, PRODUCT_SCOPE
-
-
-_MODE_MAP: dict[str, StartupJourneyMode] = {
-    "manual": StartupJourneyMode.MANUAL_COACH,
-    "observe": StartupJourneyMode.OBSERVE_LIVE,
-    "progression": StartupJourneyMode.PROGRESSION,
-    "review-recent": StartupJourneyMode.REVIEW_RECENT,
-    "review-paste": StartupJourneyMode.REVIEW_PASTE,
-}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -31,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("launcher", *tuple(_MODE_MAP)),
+        choices=("launcher", *tuple(CLI_STARTUP_MODE_ALIASES)),
         default="launcher",
         help="Startup journey (default: launcher).",
     )
@@ -61,7 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     config = GuiConfig()
     if args.mode != "launcher":
-        config.startup_mode = _MODE_MAP[args.mode]
+        config.startup_mode = CLI_STARTUP_MODE_ALIASES[args.mode]
 
     if args.review_file:
         config.startup_mode = StartupJourneyMode.REVIEW_FILE

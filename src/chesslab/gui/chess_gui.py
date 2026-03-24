@@ -19,7 +19,6 @@ Or simply::
 from __future__ import annotations
 
 import logging
-import enum
 import queue
 import threading
 import tkinter as tk
@@ -66,6 +65,7 @@ from chesslab.capture.screen_capture import (
 )
 from chesslab.progression import ProgressTracker
 from chesslab.gui.board_widget import BoardWidget
+from chesslab.gui.journeys import StartupJourneyMode, StartupJourneyOrchestrator
 from chesslab.gui.live_setup_assistant import LiveSetupAssistant
 from chesslab.gui.live_observer import (
     LiveObserver,
@@ -114,7 +114,6 @@ from chesslab.product_usage import (
     OBSERVE_LIVE_GUARDRAIL_TITLE,
     PRODUCT_BOUNDARY,
     PRODUCT_SCOPE,
-    journey_usage,
 )
 from chesslab.validation import CalibrationReport, SetupSupportProfile, SupportCatalogError
 
@@ -210,24 +209,6 @@ def _styled_button(
     btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
     btn.bind("<Leave>", lambda e: btn.config(bg=bg))
     return btn
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-
-class StartupJourneyMode(enum.Enum):
-    """Initial product flow selected at startup."""
-
-    MANUAL_COACH = "manual_coach"
-    OBSERVE_LIVE = "observe_live"
-    PROGRESSION = "progression"
-    REVIEW_RECENT = "review_recent"
-    REVIEW_PASTE = "review_paste"
-    REVIEW_FILE = "review_file"
-    IMPORT_LICHESS = "import_lichess"
-    IMPORT_CHESS_COM = "import_chess_com"
 
 
 @dataclass
@@ -408,6 +389,7 @@ class ChessGui:
         self._summary_panel: GameSummaryPanel | None = None
         self._progression_panel: ProgressionPanel | None = None
         self._training_panel: TrainingPanel | None = None
+        self._startup_journeys = StartupJourneyOrchestrator()
 
         # Play mode widget groups (for hiding/showing during review).
         self._play_mode_widgets: list[tk.Widget] = []
@@ -574,6 +556,44 @@ class ChessGui:
         layout.canvas.configure(scrollregion=layout.canvas.bbox("all"))
         layout.canvas.yview_moveto(0.0)
 
+    @property
+    def startup_review_file(self) -> Path | None:
+        """Return the startup review file requested by the launcher/CLI."""
+        return self._config.startup_review_file
+
+    def set_startup_status(self, text: str, *, error: bool = False) -> None:
+        """Expose startup-status updates to journey orchestrators."""
+        self._set_status(text, error=error)
+
+    def open_observe_live_startup(self) -> LiveObserverConfig | None:
+        """Collect Observe Live startup details for the selected journey."""
+        assert self._root is not None
+        return self._show_observe_dialog(self._root)
+
+    def start_observe_live(self, config: LiveObserverConfig) -> bool:
+        """Enter Observe Live from the startup journey router."""
+        return self._start_observation(config)
+
+    def open_progression_startup(self) -> None:
+        """Open the progression dashboard from startup routing."""
+        self._show_progression_dialog()
+
+    def open_review_recent_startup(self) -> None:
+        """Open the recent-games review flow from startup routing."""
+        self._on_recent_games()
+
+    def open_review_paste_startup(self) -> None:
+        """Open the paste-PGN review flow from startup routing."""
+        self._on_paste_pgn()
+
+    def open_review_file_startup(self, file_path: Path) -> None:
+        """Open a specific PGN file directly in review from startup routing."""
+        self._review_from_file(file_path)
+
+    def open_import_startup(self, source: RemoteGameSource) -> None:
+        """Open the requested remote-import flow from startup routing."""
+        self._open_remote_import_dialog(source)
+
     # -- Startup launcher ----------------------------------------------------
 
     def _show_startup_dialog(self, parent: tk.Tk) -> StartupJourneyMode:
@@ -650,61 +670,7 @@ class ChessGui:
             result[0] = mode
             dialog.destroy()
 
-        manual_journey = journey_usage("manual_coach")
-        observe_journey = journey_usage("observe_live")
-        review_journey = journey_usage("review")
-        actions = [
-            (
-                manual_journey.label,
-                manual_journey.launcher_summary,
-                StartupJourneyMode.MANUAL_COACH,
-            ),
-            (
-                observe_journey.label,
-                observe_journey.launcher_summary,
-                StartupJourneyMode.OBSERVE_LIVE,
-            ),
-            (
-                "Progression",
-                (
-                    "Open your learning profile built from recent reviews: move "
-                    "quality mix, centipawn-loss trend, recurring lesson themes, "
-                    "and where your errors happen most often."
-                ),
-                StartupJourneyMode.PROGRESSION,
-            ),
-            (
-                "Review Recent",
-                (
-                    "Open your saved PGNs, select one or more games, and run a "
-                    "post-game review queue that feeds progression and training."
-                ),
-                StartupJourneyMode.REVIEW_RECENT,
-            ),
-            (
-                "Paste PGN",
-                review_journey.launcher_summary,
-                StartupJourneyMode.REVIEW_PASTE,
-            ),
-            (
-                "Import Lichess",
-                (
-                    "Fetch your latest public Lichess games by username, select the "
-                    "ones you want, then import and review them in one flow."
-                ),
-                StartupJourneyMode.IMPORT_LICHESS,
-            ),
-            (
-                "Import Chess.com",
-                (
-                    "Fetch your latest public Chess.com archive games by username, "
-                    "select one or more, then import and review them in one flow."
-                ),
-                StartupJourneyMode.IMPORT_CHESS_COM,
-            ),
-        ]
-
-        for label, description, mode in actions:
+        for journey in self._startup_journeys.launcher_entries():
             card = tk.Frame(container, bg=_CARD_BORDER)
             card.pack(fill="x", pady=(0, 8))
             inner = tk.Frame(card, bg=_BG_SECONDARY)
@@ -715,7 +681,7 @@ class ChessGui:
 
             tk.Label(
                 row,
-                text=label,
+                text=journey.label,
                 bg=_BG_SECONDARY,
                 fg=_FG,
                 font=("sans-serif", 11, "bold"),
@@ -725,7 +691,7 @@ class ChessGui:
             _styled_button(
                 row,
                 text="Start",
-                command=lambda m=mode: choose(m),
+                command=lambda m=journey.mode: choose(m),
                 bg=_BTN_ACCENT_BG,
                 fg=_BTN_ACCENT_FG,
                 hover_bg=_BTN_ACCENT_HOVER,
@@ -737,7 +703,7 @@ class ChessGui:
 
             tk.Label(
                 inner,
-                text=description,
+                text=journey.description,
                 bg=_BG_SECONDARY,
                 fg=_FG_DIM,
                 font=("sans-serif", 9),
@@ -766,47 +732,7 @@ class ChessGui:
         """Execute optional startup actions chosen from the launcher."""
         if self._root is None:
             return
-
-        if mode is StartupJourneyMode.OBSERVE_LIVE:
-            config = self._show_observe_dialog(self._root)
-            if config is not None:
-                self._start_observation(config)
-            return
-
-        if mode is StartupJourneyMode.PROGRESSION:
-            self._set_status("Progression — review your recent learning trends.")
-            self._show_progression_dialog()
-            return
-
-        if mode is StartupJourneyMode.REVIEW_RECENT:
-            self._set_status("Review — select a saved game for post-game analysis.")
-            self._on_recent_games()
-            return
-
-        if mode is StartupJourneyMode.REVIEW_PASTE:
-            self._set_status("Review — paste a PGN to launch post-game analysis.")
-            self._on_paste_pgn()
-            return
-
-        if mode is StartupJourneyMode.REVIEW_FILE:
-            if self._config.startup_review_file is None:
-                self._set_status("No review file was provided.", error=True)
-                return
-            self._set_status(
-                f"Review — loading post-game analysis from "
-                f"{self._config.startup_review_file.name}"
-            )
-            self._review_from_file(self._config.startup_review_file)
-            return
-
-        if mode is StartupJourneyMode.IMPORT_LICHESS:
-            self._set_status("Import — fetch recent public games from Lichess.")
-            self._open_remote_import_dialog(RemoteGameSource.LICHESS)
-            return
-
-        if mode is StartupJourneyMode.IMPORT_CHESS_COM:
-            self._set_status("Import — fetch recent public games from Chess.com.")
-            self._open_remote_import_dialog(RemoteGameSource.CHESS_COM)
+        self._startup_journeys.launch(self, mode)
 
     # -- Color selection dialog ----------------------------------------------
 
