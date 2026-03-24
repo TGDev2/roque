@@ -16,6 +16,7 @@ from chesslab.analysis import AnalysisConfig, ContinuousUpdate
 from chesslab.coach.game_coach import ContinuousAdvice, PlayerColor
 from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
+from chesslab.persistence.remote_import import RemoteGameSource
 from chesslab.persistence.review_history import TrainingPositionSummary
 from chesslab.review.game_reviewer import (
     GamePhase,
@@ -407,6 +408,30 @@ class TestObserveLiveHelpers:
         gui._apply_startup_mode(StartupJourneyMode.PROGRESSION)
 
         gui._show_progression_dialog.assert_called_once()
+
+    def test_apply_startup_mode_import_lichess_opens_dialog(self) -> None:
+        gui = ChessGui()
+        gui._root = MagicMock()
+        gui._set_status = MagicMock()
+        gui._open_remote_import_dialog = MagicMock()
+
+        gui._apply_startup_mode(StartupJourneyMode.IMPORT_LICHESS)
+
+        gui._open_remote_import_dialog.assert_called_once_with(
+            RemoteGameSource.LICHESS,
+        )
+
+    def test_apply_startup_mode_import_chess_com_opens_dialog(self) -> None:
+        gui = ChessGui()
+        gui._root = MagicMock()
+        gui._set_status = MagicMock()
+        gui._open_remote_import_dialog = MagicMock()
+
+        gui._apply_startup_mode(StartupJourneyMode.IMPORT_CHESS_COM)
+
+        gui._open_remote_import_dialog.assert_called_once_with(
+            RemoteGameSource.CHESS_COM,
+        )
 
 
 class TestBoardMoveHints:

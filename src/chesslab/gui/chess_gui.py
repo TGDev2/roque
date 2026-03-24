@@ -31,6 +31,12 @@ from tkinter import filedialog, messagebox
 import chess
 
 from chesslab.persistence.game_storage import GameRecord, GameStorage, build_headers
+from chesslab.persistence.remote_import import (
+    RemoteGameCandidate,
+    RemoteGameSource,
+    RemoteImportBatchResult,
+    RemoteImportService,
+)
 from chesslab.persistence.review_history import ReviewHistoryStorage
 
 from chesslab.analysis import AnalysisConfig, ContinuousAnalysisHandle
@@ -205,6 +211,8 @@ class StartupJourneyMode(enum.Enum):
     REVIEW_RECENT = "review_recent"
     REVIEW_PASTE = "review_paste"
     REVIEW_FILE = "review_file"
+    IMPORT_LICHESS = "import_lichess"
+    IMPORT_CHESS_COM = "import_chess_com"
 
 
 @dataclass
@@ -269,6 +277,7 @@ class ChessGui:
 
         # Persistence.
         self._storage = GameStorage()
+        self._remote_import = RemoteImportService(storage=self._storage)
         self._review_history = ReviewHistoryStorage()
         self._progress_tracker = ProgressTracker(self._review_history)
         self._training_service = WeaknessTrainingService(ReviewConfig(
@@ -356,6 +365,8 @@ class ChessGui:
                 StartupJourneyMode.REVIEW_RECENT,
                 StartupJourneyMode.REVIEW_PASTE,
                 StartupJourneyMode.REVIEW_FILE,
+                StartupJourneyMode.IMPORT_LICHESS,
+                StartupJourneyMode.IMPORT_CHESS_COM,
             }:
                 player_color = PlayerColor.WHITE
                 if self._engine_elo is None:
@@ -511,6 +522,22 @@ class ChessGui:
                 review_journey.launcher_summary,
                 StartupJourneyMode.REVIEW_PASTE,
             ),
+            (
+                "Import Lichess",
+                (
+                    "Fetch your latest public Lichess games by username, select the "
+                    "ones you want, and add them directly to Review Recent."
+                ),
+                StartupJourneyMode.IMPORT_LICHESS,
+            ),
+            (
+                "Import Chess.com",
+                (
+                    "Fetch your latest public Chess.com archive games by username, "
+                    "select one or more, and save them straight into Review Recent."
+                ),
+                StartupJourneyMode.IMPORT_CHESS_COM,
+            ),
         ]
 
         for label, description, mode in actions:
@@ -609,6 +636,16 @@ class ChessGui:
                 f"{self._config.startup_review_file.name}"
             )
             self._review_from_file(self._config.startup_review_file)
+            return
+
+        if mode is StartupJourneyMode.IMPORT_LICHESS:
+            self._set_status("Import — fetch recent public games from Lichess.")
+            self._open_remote_import_dialog(RemoteGameSource.LICHESS)
+            return
+
+        if mode is StartupJourneyMode.IMPORT_CHESS_COM:
+            self._set_status("Import — fetch recent public games from Chess.com.")
+            self._open_remote_import_dialog(RemoteGameSource.CHESS_COM)
 
     # -- Color selection dialog ----------------------------------------------
 
@@ -911,6 +948,12 @@ class ChessGui:
             on_prev_error=self._review_prev_error,
             on_next_error=self._review_next_error,
             on_training=self._start_training_from_review,
+            on_import_lichess=lambda: self._open_remote_import_dialog(
+                RemoteGameSource.LICHESS,
+            ),
+            on_import_chess_com=lambda: self._open_remote_import_dialog(
+                RemoteGameSource.CHESS_COM,
+            ),
             on_exit_review=self._exit_review_mode,
             on_back_to_launcher=self._return_to_launcher,
         )
@@ -2924,6 +2967,294 @@ class ChessGui:
             self._root.winfo_height() - dialog.winfo_height()
         ) // 2
         dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _open_remote_import_dialog(self, source: RemoteGameSource) -> None:
+        """Open a dialog to fetch and import recent public platform games."""
+        assert self._root is not None
+
+        dialog = tk.Toplevel(self._root)
+        dialog.title(f"Import from {source.label}")
+        dialog.configure(bg=_BG)
+        dialog.transient(self._root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        container = tk.Frame(dialog, bg=_BG)
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        tk.Label(
+            container,
+            text=f"Import from {source.label}",
+            bg=_BG,
+            fg=_FG,
+            font=("sans-serif", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        tk.Label(
+            container,
+            text=(
+                "Fetch your latest public games by username. Only the platform "
+                "username is sent to the selected API."
+            ),
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=430,
+        ).pack(anchor="w", pady=(0, 10))
+
+        controls = tk.Frame(container, bg=_BG)
+        controls.pack(fill="x", pady=(0, 8))
+
+        tk.Label(
+            controls,
+            text="Username",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left")
+
+        username_border = tk.Frame(controls, bg=_ENTRY_BORDER)
+        username_border.pack(side="left", padx=(6, 10))
+
+        username_entry = tk.Entry(
+            username_border,
+            bg=_ENTRY_BG,
+            fg=_ENTRY_FG,
+            insertbackground=_FG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=20,
+            font=("monospace", 10),
+        )
+        username_entry.pack(padx=1, pady=1, ipady=2)
+
+        tk.Label(
+            controls,
+            text="Last",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left")
+
+        limit_var = tk.IntVar(value=10)
+        limit_spin = tk.Spinbox(
+            controls,
+            from_=1,
+            to=50,
+            width=4,
+            textvariable=limit_var,
+            justify="center",
+            bg=_ENTRY_BG,
+            fg=_ENTRY_FG,
+            buttonbackground=_BTN_BG,
+            insertbackground=_FG,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=("monospace", 10),
+        )
+        limit_spin.pack(side="left", padx=(6, 6))
+
+        tk.Label(
+            controls,
+            text="games",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+        ).pack(side="left")
+
+        games: list[RemoteGameCandidate] = []
+
+        list_frame = tk.Frame(container, bg=_CARD_BORDER)
+        list_frame.pack(fill="both", expand=True)
+
+        listbox = tk.Listbox(
+            list_frame,
+            bg=_BG_SECONDARY,
+            fg=_FG,
+            font=("monospace", 10),
+            selectmode="extended",
+            selectbackground=_ACCENT,
+            selectforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            height=12,
+            width=58,
+        )
+        listbox.pack(fill="both", expand=True, padx=1, pady=1)
+
+        feedback_label = tk.Label(
+            container,
+            text="Enter a username, then fetch the latest public games.",
+            bg=_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 9),
+            justify="left",
+            wraplength=430,
+        )
+        feedback_label.pack(anchor="w", pady=(8, 0))
+
+        def set_feedback(
+            message: str,
+            *,
+            error: bool = False,
+            success: bool = False,
+        ) -> None:
+            colour = _ERROR if error else (_SUCCESS if success else _FG_DIM)
+            feedback_label.config(text=message, fg=colour)
+
+        def refresh_listbox() -> None:
+            listbox.delete(0, "end")
+            listbox.selection_clear(0, "end")
+            for index, game in enumerate(games):
+                listbox.insert("end", game.display_label())
+                if not game.already_imported:
+                    listbox.selection_set(index)
+
+        def on_fetch() -> None:
+            nonlocal games
+            username = username_entry.get().strip()
+            try:
+                limit = self._coerce_remote_import_limit(limit_var.get())
+            except (tk.TclError, ValueError) as exc:
+                set_feedback(f"Invalid game count: {exc}", error=True)
+                return
+
+            set_feedback(f"Loading recent games from {source.label}...")
+            dialog.update_idletasks()
+            try:
+                games = self._remote_import.list_recent_games(
+                    source,
+                    username=username,
+                    limit=limit,
+                )
+            except Exception as exc:
+                games = []
+                listbox.delete(0, "end")
+                set_feedback(str(exc), error=True)
+                self._set_status(f"Import failed: {exc}", error=True)
+                return
+
+            refresh_listbox()
+            importable_count = sum(not game.already_imported for game in games)
+            if importable_count:
+                message = (
+                    f"Fetched {len(games)} game(s). {importable_count} ready to import."
+                )
+                set_feedback(message, success=True)
+                self._set_status(f"{source.label}: {message}")
+            else:
+                message = (
+                    f"Fetched {len(games)} game(s). Everything is already imported."
+                )
+                set_feedback(message)
+                self._set_status(f"{source.label}: {message}")
+
+        def on_import() -> None:
+            nonlocal games
+            selection = listbox.curselection()
+            if not games:
+                set_feedback("Fetch games first.", error=True)
+                return
+            if not selection:
+                set_feedback("Select at least one game to import.", error=True)
+                return
+
+            selected_games = [games[int(index)] for index in selection]
+            set_feedback("Importing selected games...")
+            dialog.update_idletasks()
+
+            result = self._remote_import.import_games(selected_games)
+            failed_ids = {failure.game.game_id for failure in result.failures}
+            completed_ids = {
+                game.game_id for game in selected_games if game.game_id not in failed_ids
+            }
+            games = [
+                replace(game, already_imported=True)
+                if game.game_id in completed_ids
+                else game
+                for game in games
+            ]
+            refresh_listbox()
+
+            summary = self._format_remote_import_summary(source, result)
+            if result.failed_count:
+                detail = result.failures[0].message
+                if result.failed_count > 1:
+                    detail += f" (+{result.failed_count - 1} more)"
+                set_feedback(f"{summary}\n{detail}", error=result.imported_count == 0)
+            else:
+                set_feedback(summary, success=result.imported_count > 0)
+            self._set_status(summary, error=result.failed_count > 0 and result.imported_count == 0)
+
+        btn_frame = tk.Frame(container, bg=_BG)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        fetch_btn = _styled_button(
+            btn_frame,
+            text="Fetch",
+            command=on_fetch,
+            bg=_BTN_ACCENT_BG,
+            fg=_BTN_ACCENT_FG,
+            hover_bg=_BTN_ACCENT_HOVER,
+            active_bg="#1e88e5",
+            font=("sans-serif", 10, "bold"),
+        )
+        fetch_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+        import_btn = _styled_button(
+            btn_frame,
+            text="Import Selected",
+            command=on_import,
+            font=("sans-serif", 10, "bold"),
+        )
+        import_btn.pack(side="left", fill="x", expand=True, padx=(4, 4))
+
+        close_btn = _styled_button(
+            btn_frame,
+            text="Close",
+            command=dialog.destroy,
+            font=("sans-serif", 10),
+        )
+        close_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        username_entry.bind("<Return>", lambda _event: on_fetch())
+        limit_spin.bind("<Return>", lambda _event: on_fetch())
+
+        dialog.update_idletasks()
+        x = self._root.winfo_x() + (
+            self._root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        y = self._root.winfo_y() + (
+            self._root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        username_entry.focus_set()
+
+    @staticmethod
+    def _coerce_remote_import_limit(raw_limit: int) -> int:
+        """Clamp the requested remote import batch size."""
+        return max(1, min(int(raw_limit), 50))
+
+    @staticmethod
+    def _format_remote_import_summary(
+        source: RemoteGameSource,
+        result: RemoteImportBatchResult,
+    ) -> str:
+        """Build a compact user-facing summary for an import batch."""
+        fragments: list[str] = []
+        if result.imported_count:
+            fragments.append(f"{result.imported_count} imported")
+        if result.skipped_count:
+            fragments.append(f"{result.skipped_count} already present")
+        if result.failed_count:
+            fragments.append(f"{result.failed_count} failed")
+        if not fragments:
+            return f"{source.label}: nothing was imported."
+        return f"{source.label}: {', '.join(fragments)}."
 
     def _show_progression_dialog(self) -> None:
         """Show the cross-session progression dashboard."""

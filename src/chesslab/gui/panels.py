@@ -656,6 +656,8 @@ class ReviewNavigationPanel(tk.Frame):
         on_prev_error: Callable[[], None],
         on_next_error: Callable[[], None],
         on_training: Callable[[], None] | None,
+        on_import_lichess: Callable[[], None] | None = None,
+        on_import_chess_com: Callable[[], None] | None = None,
         on_exit_review: Callable[[], None],
         on_back_to_launcher: Callable[[], None] | None = None,
     ) -> None:
@@ -721,6 +723,48 @@ class ReviewNavigationPanel(tk.Frame):
             cursor="hand2", highlightthickness=0,
         )
         exit_btn.pack(side="left", fill="x", expand=True, padx=(1, 0))
+
+        if on_import_lichess is not None or on_import_chess_com is not None:
+            import_row = tk.Frame(self, bg=_BG)
+            import_row.pack(fill="x", pady=(2, 0))
+
+            if on_import_lichess is not None:
+                lichess_btn = tk.Button(
+                    import_row,
+                    text="Import Lichess",
+                    command=on_import_lichess,
+                    font=("sans-serif", 9),
+                    bg=_CARD_BG,
+                    fg=_FG,
+                    activebackground=_ACCENT_DIM,
+                    activeforeground="#ffffff",
+                    relief="flat",
+                    bd=0,
+                    padx=6,
+                    pady=3,
+                    cursor="hand2",
+                    highlightthickness=0,
+                )
+                lichess_btn.pack(side="left", fill="x", expand=True, padx=(0, 1))
+
+            if on_import_chess_com is not None:
+                chess_com_btn = tk.Button(
+                    import_row,
+                    text="Import Chess.com",
+                    command=on_import_chess_com,
+                    font=("sans-serif", 9),
+                    bg=_CARD_BG,
+                    fg=_FG,
+                    activebackground=_ACCENT_DIM,
+                    activeforeground="#ffffff",
+                    relief="flat",
+                    bd=0,
+                    padx=6,
+                    pady=3,
+                    cursor="hand2",
+                    highlightthickness=0,
+                )
+                chess_com_btn.pack(side="left", fill="x", expand=True, padx=(1, 0))
 
         # Optional "Back to Launcher" row — shown/hidden dynamically.
         self._launcher_row = tk.Frame(self, bg=_BG)

@@ -25,6 +25,7 @@ from chesslab.persistence.game_storage import (
     GameRecord,
     GameStorage,
     GameSummary,
+    ImportedGameSaveResult,
     PersistenceError,
     build_headers,
 )
@@ -46,6 +47,18 @@ def _make_board(*san_moves: str) -> chess.Board:
 def _make_scholar_mate_board() -> chess.Board:
     """Board after scholar's mate: 1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#."""
     return _make_board("e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7#")
+
+
+IMPORTED_PGN = """\
+[Event "Rated Blitz game"]
+[Site "https://lichess.org/abcd1234"]
+[Date "2026.03.24"]
+[White "Alice"]
+[Black "Bob"]
+[Result "1-0"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 1-0
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +396,85 @@ class TestListRecentGames:
         assert s.result == "*"
         assert s.move_count == 3
         assert s.file_path == path
+
+
+# ---------------------------------------------------------------------------
+# imported PGN storage
+# ---------------------------------------------------------------------------
+
+
+class TestImportedGameStorage:
+    """Tests for imported PGN persistence and deduplication."""
+
+    def test_store_imported_game_writes_file_and_lists_recent(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        storage = GameStorage(games_dir=tmp_path)
+
+        result = storage.store_imported_game(
+            IMPORTED_PGN,
+            source="lichess",
+            source_game_id="abcd1234",
+        )
+
+        assert isinstance(result, ImportedGameSaveResult)
+        assert result.imported is True
+        assert result.file_path.exists()
+
+        recent = storage.list_recent_games()
+        assert len(recent) == 1
+        assert recent[0].white == "Alice"
+        assert recent[0].black == "Bob"
+        assert recent[0].file_path == result.file_path
+
+    def test_store_imported_game_deduplicates_by_source_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        storage = GameStorage(games_dir=tmp_path)
+
+        first = storage.store_imported_game(
+            IMPORTED_PGN,
+            source="lichess",
+            source_game_id="abcd1234",
+        )
+        second = storage.store_imported_game(
+            IMPORTED_PGN.replace("Alice", "Alice Updated"),
+            source="lichess",
+            source_game_id="abcd1234",
+        )
+
+        assert first.imported is True
+        assert second.imported is False
+        assert second.file_path == first.file_path
+        assert len(list(tmp_path.glob("*.pgn"))) == 1
+
+    def test_store_imported_game_deduplicates_by_hash_without_source_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        storage = GameStorage(games_dir=tmp_path)
+
+        first = storage.store_imported_game(IMPORTED_PGN, source="lichess")
+        second = storage.store_imported_game(IMPORTED_PGN, source="chess.com")
+
+        assert first.imported is True
+        assert second.imported is False
+        assert second.file_path == first.file_path
+
+    def test_store_imported_game_rejects_headers_only_pgn(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        storage = GameStorage(games_dir=tmp_path)
+
+        with pytest.raises(PersistenceError, match="does not contain any moves"):
+            storage.store_imported_game(
+                '[Event "Empty"]\n[Result "*"]\n\n*',
+                source="lichess",
+                source_game_id="empty",
+            )
 
 
 # ---------------------------------------------------------------------------

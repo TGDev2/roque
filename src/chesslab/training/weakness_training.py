@@ -167,9 +167,13 @@ class WeaknessTrainingService:
             key=lambda item: (-item.relevance_score, item.position.ply),
         )
         selected: list[TrainingExercise] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         for exercise in ordered:
-            key = (exercise.position.fen, exercise.position.best_move_uci)
+            key = (
+                exercise.position.fen,
+                exercise.position.played_uci,
+                exercise.position.best_move_uci,
+            )
             if key in seen:
                 continue
             seen.add(key)

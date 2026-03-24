@@ -355,9 +355,13 @@ def _build_training_positions(
         key=lambda item: (-item[0], item[1].ply),
     )
     unique: list[TrainingPositionSummary] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for _score, position in ordered:
-        key = (position.fen, position.best_move_uci)
+        key = (
+            position.fen,
+            position.played_uci,
+            position.best_move_uci,
+        )
         if key in seen:
             continue
         seen.add(key)
