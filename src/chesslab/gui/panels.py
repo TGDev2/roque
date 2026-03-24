@@ -10,6 +10,8 @@ import logging
 import tkinter as tk
 from typing import Callable
 
+import chess
+
 from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
 from chesslab.progression import ProgressionSnapshot, ProgressionTrendPoint
@@ -20,6 +22,11 @@ from chesslab.review.game_reviewer import (
     MoveClassification,
     ReviewLesson,
     ReviewedMove,
+)
+from chesslab.training import (
+    TrainingExercise,
+    TrainingFeedbackLabel,
+    TrainingMoveFeedback,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +87,16 @@ _PHASE_LABELS: dict[GamePhase, str] = {
     GamePhase.OPENING: "Opening",
     GamePhase.MIDDLEGAME: "Middlegame",
     GamePhase.ENDGAME: "Endgame",
+}
+_TRAINING_FEEDBACK_COLORS: dict[TrainingFeedbackLabel, str] = {
+    TrainingFeedbackLabel.GOOD: _EVAL_POSITIVE,
+    TrainingFeedbackLabel.BETTER_AVAILABLE: _LOADING,
+    TrainingFeedbackLabel.SIGNIFICANT_ERROR: _EVAL_NEGATIVE,
+}
+_TRAINING_FEEDBACK_LABELS: dict[TrainingFeedbackLabel, str] = {
+    TrainingFeedbackLabel.GOOD: "Good move",
+    TrainingFeedbackLabel.BETTER_AVAILABLE: "There was better",
+    TrainingFeedbackLabel.SIGNIFICANT_ERROR: "Significant error",
 }
 
 
@@ -638,6 +655,7 @@ class ReviewNavigationPanel(tk.Frame):
         on_last: Callable[[], None],
         on_prev_error: Callable[[], None],
         on_next_error: Callable[[], None],
+        on_training: Callable[[], None] | None,
         on_exit_review: Callable[[], None],
         on_back_to_launcher: Callable[[], None] | None = None,
     ) -> None:
@@ -684,6 +702,16 @@ class ReviewNavigationPanel(tk.Frame):
             cursor="hand2", highlightthickness=0,
         )
         next_err.pack(side="left", fill="x", expand=True, padx=(1, 1))
+
+        if on_training is not None:
+            train_btn = tk.Button(
+                err_row, text="Train weakness", command=on_training,
+                font=("sans-serif", 9), bg=_CARD_BG, fg=_ACCENT,
+                activebackground=_ACCENT_DIM, activeforeground="#ffffff",
+                relief="flat", bd=0, padx=6, pady=3,
+                cursor="hand2", highlightthickness=0,
+            )
+            train_btn.pack(side="left", fill="x", expand=True, padx=(1, 1))
 
         exit_btn = tk.Button(
             err_row, text="Exit Review", command=on_exit_review,
@@ -975,6 +1003,273 @@ class GameSummaryPanel(tk.Frame):
         if lesson.phase is not None:
             return lesson.phase.value.capitalize()
         return "position"
+
+
+# ---------------------------------------------------------------------------
+# Training panel
+# ---------------------------------------------------------------------------
+
+
+class TrainingPanel(tk.Frame):
+    """Displays a targeted training exercise and move feedback."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        on_next: Callable[[], None],
+        on_exit: Callable[[], None],
+    ) -> None:
+        super().__init__(parent, bg=_BG)
+
+        card = _card_frame(self)
+        card.pack(fill="both", expand=True)
+        inner = card._inner  # type: ignore[attr-defined]
+
+        header = tk.Frame(inner, bg=_CARD_BG)
+        header.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            header,
+            text="TRAINING",
+            bg=_CARD_BG,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+        ).pack(side="left")
+
+        self._progress_label = tk.Label(
+            header,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="e",
+        )
+        self._progress_label.pack(side="right")
+
+        self._content = tk.Frame(inner, bg=_CARD_BG)
+        self._content.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._prompt_label = tk.Label(
+            self._content,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 12, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._prompt_label.pack(fill="x", pady=(0, 6))
+
+        self._focus_label = tk.Label(
+            self._content,
+            text="",
+            bg=_CARD_BG,
+            fg=_ACCENT,
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._focus_label.pack(fill="x")
+
+        self._source_label = tk.Label(
+            self._content,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._source_label.pack(fill="x", pady=(2, 6))
+
+        self._context_label = tk.Label(
+            self._content,
+            text="",
+            bg=_LESSON_BG,
+            fg=_FG,
+            font=("sans-serif", 9),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+            padx=8,
+            pady=8,
+        )
+        self._context_label.pack(fill="x", pady=(0, 8))
+
+        self._feedback_badge = tk.Label(
+            self._content,
+            text="Awaiting your move",
+            bg=_ACCENT_DIM,
+            fg="#ffffff",
+            font=("sans-serif", 9, "bold"),
+            anchor="w",
+            padx=8,
+            pady=3,
+        )
+        self._feedback_badge.pack(anchor="w", pady=(0, 6))
+
+        self._feedback_body = tk.Label(
+            self._content,
+            text="Play the move you would choose on the board.",
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 9),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._feedback_body.pack(fill="x")
+
+        self._best_label = tk.Label(
+            self._content,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 9),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._best_label.pack(fill="x", pady=(8, 2))
+
+        self._top_label = tk.Label(
+            self._content,
+            text="",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("sans-serif", 8),
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._top_label.pack(fill="x")
+
+        button_row = tk.Frame(self._content, bg=_CARD_BG)
+        button_row.pack(fill="x", pady=(10, 0))
+
+        self._next_btn = tk.Button(
+            button_row,
+            text="Next position",
+            command=on_next,
+            font=("sans-serif", 9, "bold"),
+            bg=_CARD_BG,
+            fg=_ACCENT,
+            activebackground=_ACCENT_DIM,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=4,
+            cursor="hand2",
+            highlightthickness=0,
+        )
+        self._next_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+
+        tk.Button(
+            button_row,
+            text="Exit training",
+            command=on_exit,
+            font=("sans-serif", 9),
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            activebackground=_ACCENT_DIM,
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=4,
+            cursor="hand2",
+            highlightthickness=0,
+        ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+
+    def show_exercise(
+        self,
+        exercise: TrainingExercise,
+        *,
+        index: int,
+        total: int,
+    ) -> None:
+        """Render the current training exercise before the user plays a move."""
+        board = chess.Board(exercise.position.fen)
+        side = "White" if board.turn == chess.WHITE else "Black"
+        reviewed_date = exercise.reviewed_at.split("T", 1)[0]
+        classification = exercise.position.classification.value.replace("_", " ")
+
+        self._progress_label.config(text=f"{index + 1} / {total}")
+        self._prompt_label.config(
+            text=f"{side} to move. Play the move you would choose.",
+        )
+        self._focus_label.config(text=exercise.focus_reason)
+        self._source_label.config(text=f"From your review history on {reviewed_date}.")
+        self._context_label.config(
+            text=(
+                f"In the original game, {exercise.position.played_san} was marked as a "
+                f"{classification} and cost about {exercise.position.cp_loss}cp."
+            ),
+        )
+        self._feedback_badge.config(
+            text="Awaiting your move",
+            bg=_ACCENT_DIM,
+            fg="#ffffff",
+        )
+        self._feedback_body.config(
+            text="Play a move on the board to get immediate engine feedback.",
+            fg=_FG,
+        )
+        self._best_label.config(text="")
+        self._top_label.config(text="")
+        self._next_btn.config(text="Next position" if index + 1 < total else "Finish")
+
+    def show_loading(self, played_san: str) -> None:
+        """Show a short loading state while the engine checks the move."""
+        self._feedback_badge.config(
+            text="Checking move",
+            bg=_LOADING,
+            fg="#1a1a1a",
+        )
+        self._feedback_body.config(
+            text=f"Stockfish is evaluating {played_san} against the top 3 choices.",
+            fg=_FG,
+        )
+
+    def show_feedback(
+        self,
+        feedback: TrainingMoveFeedback,
+        *,
+        is_last: bool,
+    ) -> None:
+        """Render feedback after the player submits a move."""
+        colour = _TRAINING_FEEDBACK_COLORS[feedback.label]
+        badge_label = _TRAINING_FEEDBACK_LABELS[feedback.label]
+        self._feedback_badge.config(
+            text=badge_label,
+            bg=colour,
+            fg="#ffffff" if feedback.label is not TrainingFeedbackLabel.BETTER_AVAILABLE else "#1a1a1a",
+        )
+        self._feedback_body.config(text=feedback.message, fg=_FG)
+
+        best_text = (
+            f"Best move: {feedback.best_move_san}"
+            if feedback.best_move_san
+            else "Best move unavailable"
+        )
+        if feedback.best_line_san:
+            best_text += f"  |  line: {format_pv(feedback.best_line_san, max_moves=4)}"
+        self._best_label.config(text=best_text)
+
+        if feedback.top_move_sans:
+            self._top_label.config(
+                text="Top 3: " + ", ".join(feedback.top_move_sans),
+            )
+        else:
+            self._top_label.config(text="")
+
+        self._next_btn.config(text="Finish" if is_last else "Next position")
 
 
 # ---------------------------------------------------------------------------

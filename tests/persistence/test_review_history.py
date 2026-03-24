@@ -34,6 +34,10 @@ def _make_review(
         LessonTheme.TURNING_POINT,
         LessonTheme.PHASE_PATTERN,
     ),
+    best_move_ucis: tuple[str, ...] = (
+        "d2d4",
+        "d7d5",
+    ),
 ) -> GameReview:
     board = chess.Board()
     san_moves = ("e4", "e5", "Nf3", "Nc6")
@@ -41,8 +45,11 @@ def _make_review(
 
     for idx, classification in enumerate(classifications):
         fen_before = board.fen()
+        before = board.copy()
         move = board.parse_san(san_moves[idx])
         san = board.san(move)
+        best_move = chess.Move.from_uci(best_move_ucis[idx])
+        best_move_san = before.san(best_move)
         board.push(move)
         fen_after = board.fen()
         moves.append(ReviewedMove(
@@ -54,11 +61,11 @@ def _make_review(
             classification=classification,
             eval_before=Evaluation(centipawns=30, mate_in=None),
             eval_after=Evaluation(centipawns=10, mate_in=None),
-            best_move_san=san,
-            best_move_uci=move.uci(),
+            best_move_san=best_move_san,
+            best_move_uci=best_move.uci(),
             best_eval=Evaluation(centipawns=30, mate_in=None),
             cp_loss=cp_losses[idx],
-            best_pv_san=(san,),
+            best_pv_san=(best_move_san, san),
             phase=phases[idx],
             is_white=idx % 2 == 0,
             is_forced=False,
@@ -131,6 +138,12 @@ class TestReviewHistoryStorage:
         assert saved[0].error_phase_counts[GamePhase.ENDGAME] == 1
         assert saved[0].lesson_theme_counts[LessonTheme.TURNING_POINT] == 1
         assert saved[0].lesson_theme_counts[LessonTheme.PHASE_PATTERN] == 1
+        assert len(saved[0].training_positions) == 2
+        assert saved[0].training_positions[0].best_move_uci == "d7d5"
+        assert saved[0].training_positions[0].classification is MoveClassification.BLUNDER
+        assert saved[0].training_positions[0].lesson_themes == (
+            LessonTheme.PHASE_PATTERN,
+        )
 
     def test_record_review_upserts_identical_game(self, tmp_path: Path) -> None:
         storage = ReviewHistoryStorage(history_file=tmp_path / "reviews.json")

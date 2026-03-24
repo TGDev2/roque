@@ -16,6 +16,7 @@ from chesslab.analysis import AnalysisConfig, ContinuousUpdate
 from chesslab.coach.game_coach import ContinuousAdvice, PlayerColor
 from chesslab.gui.chess_gui import ChessGui, GuiConfig, StartupJourneyMode
 from chesslab.gui.live_observer import LiveObserverConfig
+from chesslab.persistence.review_history import TrainingPositionSummary
 from chesslab.review.game_reviewer import (
     GamePhase,
     GameReview,
@@ -27,6 +28,7 @@ from chesslab.review.game_reviewer import (
 )
 from chesslab.validation import CalibrationMetrics, CalibrationReport, load_support_catalog
 from chesslab.analysis import Evaluation
+from chesslab.training import TrainingExercise, TrainingFeedbackLabel, TrainingMoveFeedback
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +196,31 @@ def _make_single_move_review(move: ReviewedMove) -> GameReview:
         critical_moments=(0,),
         lessons=(),
         total_elapsed_ms=100.0,
+    )
+
+
+def _make_training_exercise() -> TrainingExercise:
+    return TrainingExercise(
+        game_id="game-1",
+        reviewed_at="2026-03-24T12:00:00+00:00",
+        source_path=None,
+        position=TrainingPositionSummary(
+            fen=chess.Board().fen(),
+            ply=0,
+            played_san="e4",
+            played_uci="e2e4",
+            best_move_san="d4",
+            best_move_uci="d2d4",
+            best_pv_san=("d4", "d5"),
+            classification=MoveClassification.MISTAKE,
+            phase=GamePhase.MIDDLEGAME,
+            cp_loss=130,
+            lesson_themes=(LessonTheme.TURNING_POINT,),
+        ),
+        relevance_score=250,
+        focus_reason="Recurring theme: Turning point",
+        focus_theme=LessonTheme.TURNING_POINT,
+        focus_phase=GamePhase.MIDDLEGAME,
     )
 
 
@@ -503,6 +530,70 @@ class TestBoardMoveHints:
 
         gui._board_widget.clear_highlights.assert_called_once()
         gui._board_widget.set_move_hint.assert_not_called()
+
+
+class TestTrainingMode:
+    def test_board_move_routes_to_training_when_mode_is_active(self) -> None:
+        gui = ChessGui()
+        gui._in_training_mode = True
+        gui._on_training_board_move = MagicMock()
+
+        gui._on_board_move("e2", "e4")
+
+        gui._on_training_board_move.assert_called_once_with("e2", "e4")
+
+    def test_start_training_from_review_uses_current_review_as_focus(self) -> None:
+        gui = ChessGui()
+        review = _make_review_with_lesson()
+        gui._game_review = review
+        gui._start_training_session = MagicMock()
+
+        gui._start_training_from_review()
+
+        gui._start_training_session.assert_called_once_with(
+            sample_size=gui._progression_sample_size,
+            focus_review=review,
+        )
+
+    def test_start_training_session_surfaces_unavailable_message(self) -> None:
+        gui = ChessGui()
+        gui._review_history = MagicMock()
+        gui._review_history.list_recent_reviews.return_value = []
+        gui._training_service = MagicMock()
+        gui._training_service.build_session.return_value = ()
+        gui._show_training_unavailable = MagicMock()
+
+        gui._start_training_session(sample_size=5, focus_review=None)
+
+        gui._show_training_unavailable.assert_called_once()
+
+    def test_training_feedback_updates_panel_and_status(self) -> None:
+        gui = ChessGui()
+        gui._in_training_mode = True
+        gui._training_panel = MagicMock()
+        gui._training_session = (_make_training_exercise(),)
+        gui._set_status = MagicMock()
+
+        feedback = TrainingMoveFeedback(
+            label=TrainingFeedbackLabel.GOOD,
+            played_san="Nf3",
+            played_uci="g1f3",
+            cp_loss=5,
+            move_rank=3,
+            best_move_san="e4",
+            best_move_uci="e2e4",
+            best_line_san=("e4", "e5"),
+            top_move_sans=("e4", "d4", "Nf3"),
+            message="Bon coup.",
+        )
+
+        gui._on_training_feedback(feedback)
+
+        gui._training_panel.show_feedback.assert_called_once_with(
+            feedback,
+            is_last=True,
+        )
+        gui._set_status.assert_called_once_with("Training — good move")
 
 
 class TestManualCoachReviewOffer:

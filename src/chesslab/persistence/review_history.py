@@ -19,6 +19,7 @@ from chesslab.review.game_reviewer import (
     GameReview,
     LessonTheme,
     MoveClassification,
+    ReviewLesson,
 )
 
 from chesslab.persistence.game_storage import PersistenceError
@@ -38,6 +39,71 @@ _ERROR_CLASSIFICATIONS = frozenset({
     MoveClassification.MISTAKE,
     MoveClassification.BLUNDER,
 })
+_TRAINING_TARGET_CLASSIFICATIONS = frozenset({
+    MoveClassification.MISTAKE,
+    MoveClassification.BLUNDER,
+})
+_MAX_TRAINING_POSITIONS = 8
+
+
+@dataclass(frozen=True)
+class TrainingPositionSummary:
+    """Persisted training candidate extracted from a reviewed critical position."""
+
+    fen: str
+    ply: int
+    played_san: str
+    played_uci: str
+    best_move_san: str
+    best_move_uci: str
+    best_pv_san: tuple[str, ...]
+    classification: MoveClassification
+    phase: GamePhase
+    cp_loss: int
+    lesson_themes: tuple[LessonTheme, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialise the training candidate to JSON-compatible data."""
+        return {
+            "fen": self.fen,
+            "ply": self.ply,
+            "played_san": self.played_san,
+            "played_uci": self.played_uci,
+            "best_move_san": self.best_move_san,
+            "best_move_uci": self.best_move_uci,
+            "best_pv_san": list(self.best_pv_san),
+            "classification": self.classification.value,
+            "phase": self.phase.value,
+            "cp_loss": self.cp_loss,
+            "lesson_themes": [theme.value for theme in self.lesson_themes],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> TrainingPositionSummary:
+        """Rebuild a training candidate from JSON payload."""
+        return cls(
+            fen=str(payload.get("fen", "")),
+            ply=int(payload.get("ply", 0)),
+            played_san=str(payload.get("played_san", "")),
+            played_uci=str(payload.get("played_uci", "")),
+            best_move_san=str(payload.get("best_move_san", "")),
+            best_move_uci=str(payload.get("best_move_uci", "")),
+            best_pv_san=tuple(_load_str_list(payload.get("best_pv_san"))),
+            classification=_load_enum_value(
+                payload.get("classification"),
+                MoveClassification,
+                MoveClassification.MISTAKE,
+            ),
+            phase=_load_enum_value(
+                payload.get("phase"),
+                GamePhase,
+                GamePhase.MIDDLEGAME,
+            ),
+            cp_loss=int(payload.get("cp_loss", 0)),
+            lesson_themes=tuple(
+                _load_enum_sequence(payload.get("lesson_themes"), LessonTheme),
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -52,6 +118,7 @@ class ReviewSummary:
     error_phase_counts: dict[GamePhase, int]
     lesson_theme_counts: dict[LessonTheme, int]
     source_path: str | None = None
+    training_positions: tuple[TrainingPositionSummary, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Serialise the summary to a JSON-compatible dict."""
@@ -73,6 +140,9 @@ class ReviewSummary:
                 for theme in LessonTheme
             },
             "source_path": self.source_path,
+            "training_positions": [
+                position.to_dict() for position in self.training_positions
+            ],
         }
 
     @classmethod
@@ -96,6 +166,10 @@ class ReviewSummary:
                 tuple(LessonTheme),
             ),
             source_path=_maybe_str(payload.get("source_path")),
+            training_positions=tuple(
+                TrainingPositionSummary.from_dict(item)
+                for item in _load_dict_list(payload.get("training_positions"))
+            ),
         )
 
 
@@ -137,6 +211,7 @@ def build_review_summary(
         error_phase_counts=error_phase_counts,
         lesson_theme_counts=lesson_theme_counts,
         source_path=normalized_source,
+        training_positions=_build_training_positions(review),
     )
 
 
@@ -237,6 +312,112 @@ def _build_game_id(review: GameReview, *, source_path: Path | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _build_training_positions(
+    review: GameReview,
+) -> tuple[TrainingPositionSummary, ...]:
+    """Extract reusable training positions from a completed review."""
+    lesson_themes_by_ply = _map_lesson_themes(review.lessons, review.moves)
+    candidates: list[tuple[int, TrainingPositionSummary]] = []
+
+    for move in review.moves:
+        if move.is_forced:
+            continue
+        if not move.best_move_uci or move.best_move_uci == move.uci:
+            continue
+
+        themes = lesson_themes_by_ply.get(move.ply, ())
+        if (
+            move.classification not in _TRAINING_TARGET_CLASSIFICATIONS
+            and not themes
+        ):
+            continue
+
+        score = _training_position_score(move, themes)
+        candidates.append((
+            score,
+            TrainingPositionSummary(
+                fen=move.fen_before,
+                ply=move.ply,
+                played_san=move.san,
+                played_uci=move.uci,
+                best_move_san=move.best_move_san,
+                best_move_uci=move.best_move_uci,
+                best_pv_san=move.best_pv_san,
+                classification=move.classification,
+                phase=move.phase,
+                cp_loss=move.cp_loss,
+                lesson_themes=themes,
+            ),
+        ))
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: (-item[0], item[1].ply),
+    )
+    unique: list[TrainingPositionSummary] = []
+    seen: set[tuple[str, str]] = set()
+    for _score, position in ordered:
+        key = (position.fen, position.best_move_uci)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(position)
+        if len(unique) >= _MAX_TRAINING_POSITIONS:
+            break
+
+    return tuple(unique)
+
+
+def _map_lesson_themes(
+    lessons: tuple[ReviewLesson, ...],
+    moves: tuple[object, ...],
+) -> dict[int, tuple[LessonTheme, ...]]:
+    themes_by_ply: dict[int, set[LessonTheme]] = {}
+    move_lookup = {getattr(move, "ply"): move for move in moves}
+
+    for lesson in lessons:
+        related = set(lesson.related_plies)
+        related.add(lesson.focus_ply)
+        for ply in related:
+            if ply in move_lookup:
+                themes_by_ply.setdefault(ply, set()).add(lesson.theme)
+
+        if lesson.phase is None or lesson.is_white is None:
+            continue
+
+        for ply, move in move_lookup.items():
+            if (
+                getattr(move, "phase") is lesson.phase
+                and getattr(move, "is_white") is lesson.is_white
+                and getattr(move, "classification") in _TRAINING_TARGET_CLASSIFICATIONS
+            ):
+                themes_by_ply.setdefault(ply, set()).add(lesson.theme)
+
+    return {
+        ply: tuple(sorted(themes, key=lambda theme: theme.value))
+        for ply, themes in themes_by_ply.items()
+    }
+
+
+def _training_position_score(
+    move: object,
+    themes: tuple[LessonTheme, ...],
+) -> int:
+    severity = 0
+    classification = getattr(move, "classification")
+    if classification is MoveClassification.BLUNDER:
+        severity = 220
+    elif classification is MoveClassification.MISTAKE:
+        severity = 150
+    elif classification is MoveClassification.INACCURACY:
+        severity = 80
+
+    cp_loss = min(int(getattr(move, "cp_loss")), 400)
+    pv_bonus = min(len(getattr(move, "best_pv_san")), 4) * 12
+    theme_bonus = len(themes) * 45
+    return severity + cp_loss + pv_bonus + theme_bonus
+
+
 def _load_enum_counts(
     payload: object,
     members: tuple[object, ...],
@@ -246,6 +427,50 @@ def _load_enum_counts(
         member: int(raw.get(member.value, 0))  # type: ignore[attr-defined]
         for member in members
     }
+
+
+def _load_enum_value(
+    payload: object,
+    enum_type: type[object],
+    default: object,
+) -> object:
+    if not isinstance(payload, str):
+        return default
+
+    try:
+        return enum_type(payload)  # type: ignore[misc,call-arg]
+    except ValueError:
+        return default
+
+
+def _load_enum_sequence(
+    payload: object,
+    enum_type: type[object],
+) -> tuple[object, ...]:
+    if not isinstance(payload, list):
+        return ()
+
+    values: list[object] = []
+    for item in payload:
+        if not isinstance(item, str):
+            continue
+        try:
+            values.append(enum_type(item))  # type: ignore[misc,call-arg]
+        except ValueError:
+            continue
+    return tuple(values)
+
+
+def _load_dict_list(payload: object) -> list[dict[str, object]]:
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _load_str_list(payload: object) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload]
 
 
 def _maybe_str(value: object) -> str | None:

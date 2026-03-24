@@ -12,6 +12,7 @@ from chesslab.persistence.game_storage import (
 from chesslab.persistence.review_history import (
     ReviewHistoryStorage,
     ReviewSummary,
+    TrainingPositionSummary,
     build_review_summary,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     "PersistenceError",
     "ReviewHistoryStorage",
     "ReviewSummary",
+    "TrainingPositionSummary",
     "build_headers",
     "build_review_summary",
 ]

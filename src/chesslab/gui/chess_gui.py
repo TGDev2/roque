@@ -26,7 +26,7 @@ import tkinter as tk
 import tkinter.ttk as ttk
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import chess
 
@@ -71,6 +71,7 @@ from chesslab.gui.panels import (
     ReviewNavigationPanel,
     ReviewPanel,
     SuggestionsPanel,
+    TrainingPanel,
 )
 from chesslab.review.game_reviewer import (
     GameReview,
@@ -78,6 +79,12 @@ from chesslab.review.game_reviewer import (
     MoveClassification,
     ReviewCancelledError,
     ReviewConfig,
+)
+from chesslab.training import (
+    TrainingExercise,
+    TrainingFeedbackLabel,
+    TrainingMoveFeedback,
+    WeaknessTrainingService,
 )
 from chesslab.product_usage import (
     OBSERVE_LIVE_ACKNOWLEDGEMENT,
@@ -264,6 +271,11 @@ class ChessGui:
         self._storage = GameStorage()
         self._review_history = ReviewHistoryStorage()
         self._progress_tracker = ProgressTracker(self._review_history)
+        self._training_service = WeaknessTrainingService(ReviewConfig(
+            stockfish_path=self._config.analysis.stockfish_path,
+            depth=self._config.analysis.depth,
+            time_limit=self._config.analysis.time_limit,
+        ))
         self._game_saved: bool = False
         self._current_game_file: Path | None = None
         self._progression_sample_size = max(3, self._config.progression_sample_size)
@@ -279,6 +291,15 @@ class ChessGui:
         self._progress_dialog: tk.Toplevel | None = None
         self._progress_bar: ttk.Progressbar | None = None
         self._post_game_review_dialog: tk.Toplevel | None = None
+
+        # Training mode state.
+        self._in_training_mode: bool = False
+        self._training_origin_review: bool = False
+        self._training_session: tuple[TrainingExercise, ...] = ()
+        self._training_index: int = 0
+        self._training_pending: bool = False
+        self._training_request_id: int = 0
+        self._training_queue: queue.Queue[tuple[int, TrainingMoveFeedback | Exception]] = queue.Queue()
 
         # Widgets (populated by _build_window).
         self._observe_btn: tk.Button | None = None
@@ -298,10 +319,12 @@ class ChessGui:
         self._review_nav: ReviewNavigationPanel | None = None
         self._summary_panel: GameSummaryPanel | None = None
         self._progression_panel: ProgressionPanel | None = None
+        self._training_panel: TrainingPanel | None = None
 
         # Play mode widget groups (for hiding/showing during review).
         self._play_mode_widgets: list[tk.Widget] = []
         self._review_mode_widgets: list[tk.Widget] = []
+        self._training_mode_widgets: list[tk.Widget] = []
 
         # Frame refs for layout management.
         self._btn_frame: tk.Frame | None = None
@@ -887,10 +910,16 @@ class ChessGui:
             on_last=self._review_last,
             on_prev_error=self._review_prev_error,
             on_next_error=self._review_next_error,
+            on_training=self._start_training_from_review,
             on_exit_review=self._exit_review_mode,
             on_back_to_launcher=self._return_to_launcher,
         )
         self._summary_panel = GameSummaryPanel(panel_frame)
+        self._training_panel = TrainingPanel(
+            panel_frame,
+            on_next=self._training_next,
+            on_exit=self._exit_training_mode,
+        )
 
         # Track play-mode widgets for hide/show.
         self._play_mode_widgets = [
@@ -901,6 +930,7 @@ class ChessGui:
         self._review_mode_widgets = [
             self._review_panel, self._review_nav, self._summary_panel,
         ]
+        self._training_mode_widgets = [self._training_panel]
 
         # Bottom status bar.
         status_bar = tk.Frame(root, bg=_STATUS_BG, height=40)
@@ -2243,6 +2273,9 @@ class ChessGui:
 
     def _on_board_move(self, from_sq: str, to_sq: str) -> None:
         """Handle a move from board click (source, destination)."""
+        if self._in_training_mode:
+            self._on_training_board_move(from_sq, to_sq)
+            return
         if self._in_review_mode or self._observing:
             return
         assert self._coach is not None
@@ -2439,6 +2472,18 @@ class ChessGui:
         except queue.Empty:
             pass
 
+        try:
+            while True:
+                request_id, item = self._training_queue.get_nowait()
+                if request_id != self._training_request_id:
+                    continue
+                if isinstance(item, Exception):
+                    self._on_training_failed(item)
+                else:
+                    self._on_training_feedback(item)
+        except queue.Empty:
+            pass
+
         if self._root is not None:
             self._root.after(_POLL_INTERVAL_MS, self._poll_queue)
 
@@ -2538,6 +2583,8 @@ class ChessGui:
     def _on_new_game(self) -> None:
         """Start a new game."""
         self._close_post_game_review_dialog()
+        if self._in_training_mode:
+            self._exit_training_mode()
         if self._in_review_mode:
             self._exit_review_mode()
         self._auto_save()
@@ -2593,6 +2640,8 @@ class ChessGui:
     def _on_close(self) -> None:
         """Clean up resources and close the window."""
         self._close_post_game_review_dialog()
+        if self._in_training_mode:
+            self._exit_training_mode()
         self._auto_save()
         if self._observer is not None:
             self._observer.stop()
@@ -2969,6 +3018,12 @@ class ChessGui:
         footer.pack(fill="x", pady=(10, 0))
         _styled_button(
             footer,
+            text="Train weakness",
+            command=self._start_training_from_dashboard,
+            font=("sans-serif", 10, "bold"),
+        ).pack(side="left")
+        _styled_button(
+            footer,
             text="Close",
             command=self._close_progression_dialog,
             font=("sans-serif", 10),
@@ -3024,6 +3079,321 @@ class ChessGui:
         self._progression_sample_size = limit
         self._progression_limit_var.set(limit)
         return limit
+
+    def _pack_review_widgets(self) -> None:
+        """Show the review-specific widgets."""
+        assert self._review_panel is not None
+        assert self._review_nav is not None
+        assert self._summary_panel is not None
+
+        self._review_panel.pack(fill="x", pady=(0, 6))
+        self._review_nav.pack(fill="x", pady=(0, 4))
+        self._summary_panel.pack(fill="x", pady=(0, 4))
+
+    def _hide_history_panel(self) -> None:
+        """Temporarily hide move history while a focused mode is active."""
+        if self._history_panel is not None:
+            self._history_panel.pack_forget()
+
+    def _show_history_panel(self) -> None:
+        """Re-pack move history in its standard position."""
+        if self._history_panel is None:
+            return
+        if str(self._history_panel.winfo_manager()):
+            return
+        if self._btn_frame is not None:
+            self._history_panel.pack(
+                before=self._btn_frame,
+                fill="both",
+                expand=True,
+                pady=(0, 6),
+            )
+        else:
+            self._history_panel.pack(fill="both", expand=True, pady=(0, 6))
+
+    def _restore_play_mode_view(self) -> None:
+        """Restore the standard board/panel view after a focused mode."""
+        self._show_history_panel()
+        self._set_observe_mode_ui(self._observing)
+
+        if self._coach is not None:
+            assert self._board_widget is not None
+            self._board_widget.set_position(self._coach.current_fen)
+            self._board_widget.clear_last_move()
+            self._board_widget.clear_highlights()
+            self._board_widget.set_interactive(not self._observing)
+
+            if self._history_panel is not None:
+                self._history_panel.set_history(self._coach.move_history)
+            if self._eval_panel is not None:
+                self._eval_panel.update_eval(None, 0, is_loading=False)
+            if self._suggestions_panel is not None:
+                self._suggestions_panel.update_suggestions(())
+            self._update_turn_status()
+
+    # -- Training mode -------------------------------------------------------
+
+    def _start_training_from_dashboard(self) -> None:
+        """Launch targeted training from the progression dashboard."""
+        self._start_training_session(
+            sample_size=self._coerce_progression_limit(),
+            focus_review=self._game_review if self._in_review_mode else None,
+        )
+
+    def _start_training_from_review(self) -> None:
+        """Launch targeted training using the just-completed review as context."""
+        self._start_training_session(
+            sample_size=self._progression_sample_size,
+            focus_review=self._game_review,
+        )
+
+    def _start_training_session(
+        self,
+        *,
+        sample_size: int,
+        focus_review: GameReview | None,
+    ) -> None:
+        """Build a training session from persisted reviews and enter the mode."""
+        if self._observing and not self._in_review_mode:
+            self._show_training_unavailable(
+                "Exit Observe Live before starting a training session.",
+            )
+            return
+
+        try:
+            summaries = self._review_history.list_recent_reviews(limit=sample_size)
+            session = self._training_service.build_session(
+                summaries,
+                sample_size=sample_size,
+                focus_review=focus_review,
+            )
+        except Exception as exc:
+            logger.exception("Failed to build training session.")
+            self._set_status(f"Training unavailable: {exc}", error=True)
+            return
+
+        if not session:
+            self._show_training_unavailable(
+                self._build_training_unavailable_message(summaries),
+            )
+            return
+
+        self._close_post_game_review_dialog()
+        self._close_progression_dialog()
+        self._enter_training_mode(session)
+
+    @staticmethod
+    def _build_training_unavailable_message(
+        summaries: list[object],
+    ) -> str:
+        if not summaries:
+            return (
+                "No training positions are available yet. Run a few post-game reviews "
+                "to generate reusable mistakes, blunders, and lesson positions."
+            )
+        return (
+            "No reusable training positions were found in your recent review history. "
+            "Review a few more games to generate targeted exercises from critical moments."
+        )
+
+    def _show_training_unavailable(self, message: str) -> None:
+        """Explain why targeted training cannot start yet."""
+        self._set_status(message)
+        if self._root is not None:
+            messagebox.showinfo(
+                title="Training unavailable",
+                message=message,
+                parent=self._root,
+            )
+
+    def _enter_training_mode(
+        self,
+        session: tuple[TrainingExercise, ...],
+    ) -> None:
+        """Switch the UI to the targeted training flow."""
+        self._training_origin_review = self._in_review_mode
+        self._in_training_mode = True
+        self._training_session = session
+        self._training_index = 0
+        self._training_pending = False
+        self._training_request_id += 1
+
+        if not self._training_origin_review:
+            self._clear_coaching_outputs()
+
+        if self._training_origin_review:
+            for widget in self._review_mode_widgets:
+                widget.pack_forget()
+        else:
+            for widget in self._play_mode_widgets:
+                widget.pack_forget()
+            if self._entry_frame is not None:
+                self._entry_frame.pack_forget()
+
+        self._hide_history_panel()
+
+        for widget in self._training_mode_widgets:
+            widget.pack(fill="both", expand=True)
+
+        self._show_training_exercise()
+
+    def _show_training_exercise(self) -> None:
+        """Render the current training position."""
+        exercise = self._current_training_exercise()
+        if exercise is None:
+            self._exit_training_mode()
+            return
+
+        assert self._board_widget is not None
+        assert self._training_panel is not None
+
+        self._training_pending = False
+        self._board_widget.set_position(exercise.position.fen)
+        self._board_widget.clear_last_move()
+        self._board_widget.clear_highlights()
+        self._board_widget.set_interactive(True)
+        self._training_panel.show_exercise(
+            exercise,
+            index=self._training_index,
+            total=len(self._training_session),
+        )
+        self._set_status(
+            f"Training — exercise {self._training_index + 1} / {len(self._training_session)}",
+        )
+
+    def _current_training_exercise(self) -> TrainingExercise | None:
+        """Return the currently displayed exercise, if any."""
+        if not self._training_session:
+            return None
+        if not (0 <= self._training_index < len(self._training_session)):
+            return None
+        return self._training_session[self._training_index]
+
+    def _on_training_board_move(self, from_sq: str, to_sq: str) -> None:
+        """Handle a move played on the board in training mode."""
+        if self._training_pending:
+            return
+
+        exercise = self._current_training_exercise()
+        if exercise is None:
+            return
+
+        try:
+            board = chess.Board(exercise.position.fen)
+            uci_str = from_sq + to_sq
+            move = chess.Move.from_uci(uci_str)
+            san = board.san(move)
+        except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError):
+            self._set_status(f"Invalid training move: {from_sq}{to_sq}", error=True)
+            return
+
+        board.push(move)
+
+        assert self._board_widget is not None
+        assert self._training_panel is not None
+
+        self._training_pending = True
+        self._training_request_id += 1
+        request_id = self._training_request_id
+
+        self._board_widget.set_interactive(False)
+        self._board_widget.set_position(board.fen())
+        self._board_widget.set_last_move(from_sq, to_sq[:2])
+        self._training_panel.show_loading(san)
+        self._set_status("Training — checking your move...")
+
+        worker = threading.Thread(
+            target=self._training_worker,
+            args=(request_id, exercise.position.fen, uci_str),
+            daemon=True,
+        )
+        worker.start()
+
+    def _training_worker(
+        self,
+        request_id: int,
+        fen: str,
+        move_uci: str,
+    ) -> None:
+        """Background worker: evaluate a played training move."""
+        try:
+            feedback = self._training_service.evaluate_move(fen, move_uci)
+            self._training_queue.put((request_id, feedback))
+        except Exception as exc:
+            self._training_queue.put((request_id, exc))
+
+    def _on_training_feedback(self, feedback: TrainingMoveFeedback) -> None:
+        """Apply engine feedback for the current training move."""
+        if not self._in_training_mode or self._training_panel is None:
+            return
+
+        self._training_pending = False
+        self._training_panel.show_feedback(
+            feedback,
+            is_last=self._training_index + 1 >= len(self._training_session),
+        )
+
+        if feedback.label is TrainingFeedbackLabel.GOOD:
+            status = "Training — good move"
+        elif feedback.label is TrainingFeedbackLabel.BETTER_AVAILABLE:
+            status = "Training — there was a better move"
+        else:
+            status = "Training — significant error"
+        self._set_status(status)
+
+    def _on_training_failed(self, exc: Exception) -> None:
+        """Handle a training evaluation failure."""
+        if not self._in_training_mode:
+            return
+
+        logger.exception("Training move evaluation failed: %s", exc)
+        self._training_pending = False
+        self._set_status(f"Training failed: {exc}", error=True)
+        self._show_training_exercise()
+
+    def _training_next(self) -> None:
+        """Advance to the next training position or finish the session."""
+        if not self._in_training_mode:
+            return
+
+        if self._training_index + 1 >= len(self._training_session):
+            self._exit_training_mode(
+                status_message=(
+                    f"Training session complete — {len(self._training_session)} "
+                    "position(s) practised."
+                ),
+            )
+            return
+
+        self._training_index += 1
+        self._show_training_exercise()
+
+    def _exit_training_mode(self, *, status_message: str | None = None) -> None:
+        """Leave targeted training and restore the previous mode."""
+        if not self._in_training_mode:
+            return
+
+        self._training_request_id += 1
+        self._in_training_mode = False
+        self._training_pending = False
+
+        for widget in self._training_mode_widgets:
+            widget.pack_forget()
+
+        self._training_session = ()
+        self._training_index = 0
+
+        if self._training_origin_review:
+            self._show_history_panel()
+            self._pack_review_widgets()
+            if self._review_nav is not None:
+                self._review_nav.show_launcher_button(self._from_observation)
+            self._review_navigate_to(self._review_ply)
+        else:
+            self._restore_play_mode_view()
+
+        self._training_origin_review = False
+        self._set_status(status_message or "Exited training mode")
 
     # -- Review mode ---------------------------------------------------------
 
@@ -3334,15 +3704,11 @@ class ChessGui:
         if self._entry_frame is not None:
             self._entry_frame.pack_forget()
 
-        assert self._review_panel is not None
-        assert self._review_nav is not None
         assert self._summary_panel is not None
         assert self._history_panel is not None
         assert self._eval_panel is not None
 
-        self._review_panel.pack(fill="x", pady=(0, 6))
-        self._review_nav.pack(fill="x", pady=(0, 4))
-        self._summary_panel.pack(fill="x", pady=(0, 4))
+        self._pack_review_widgets()
 
         # Populate move history with classification colours.
         moves = tuple(m.san for m in review.moves)
@@ -3395,26 +3761,7 @@ class ChessGui:
         # Hide review widgets, show play-mode widgets.
         for w in self._review_mode_widgets:
             w.pack_forget()
-
-        assert self._suggestions_panel is not None
-        assert self._btn_frame is not None
-        assert self._new_game_btn is not None
-        assert self._pgn_frame is not None
-        assert self._history_panel is not None
-        assert self._eval_panel is not None
-
-        self._set_observe_mode_ui(self._observing)
-
-        # Restore board to current coach state.
-        if self._coach is not None:
-            assert self._board_widget is not None
-            self._board_widget.set_position(self._coach.current_fen)
-            self._board_widget.clear_last_move()
-            self._board_widget.clear_highlights()
-            self._history_panel.set_history(self._coach.move_history)
-            self._eval_panel.update_eval(None, 0, is_loading=False)
-            self._suggestions_panel.update_suggestions(())
-            self._update_turn_status()
+        self._restore_play_mode_view()
 
         if self._review_panel is not None:
             self._review_panel.clear()
@@ -3426,6 +3773,8 @@ class ChessGui:
     def _return_to_launcher(self) -> None:
         """Exit review mode and re-show the startup launcher dialog."""
         self._close_post_game_review_dialog()
+        if self._in_training_mode:
+            self._exit_training_mode()
         self._exit_review_mode()
 
         if self._root is None:
