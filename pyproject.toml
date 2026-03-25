@@ -28,6 +28,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+"chesslab.openings" = ["data/*.json", "data/*.txt", "data/*.md"]
 "chesslab.recognition" = ["templates/**/*.png", "templates/**/*.json", "themes.json"]
 "chesslab.validation" = ["supported_setups.json"]
 

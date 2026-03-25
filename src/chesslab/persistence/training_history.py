@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from chesslab.openings import DetectedOpening, UNCLASSIFIED_OPENING
 from chesslab.persistence.game_storage import PersistenceError
 from chesslab.review.game_reviewer import ErrorMotif, GamePhase, LessonTheme
 
 _TRAINING_DIR = Path.home() / ".chesslab" / "training"
 _TRAINING_HISTORY_FILE = _TRAINING_DIR / "history.json"
-_SCHEMA_VERSION = 1
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+_SCHEMA_VERSION = 2
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 class TrainingAttemptOutcome(Enum):
@@ -48,6 +49,7 @@ class TrainingAttempt:
     phase: GamePhase
     lesson_themes: tuple[LessonTheme, ...] = ()
     error_motif: ErrorMotif = ErrorMotif.UNKNOWN
+    opening: DetectedOpening = UNCLASSIFIED_OPENING
 
     def to_dict(self) -> dict[str, object]:
         """Serialise the attempt to JSON-compatible data."""
@@ -71,6 +73,7 @@ class TrainingAttempt:
             "phase": self.phase.value,
             "lesson_themes": [theme.value for theme in self.lesson_themes],
             "error_motif": self.error_motif.value,
+            "opening": self.opening.to_dict(),
         }
         return payload
 
@@ -111,6 +114,7 @@ class TrainingAttempt:
                 ErrorMotif,
                 ErrorMotif.UNKNOWN,
             ),
+            opening=DetectedOpening.from_dict(payload.get("opening")),
         )
 
 
@@ -166,6 +170,7 @@ class TrainingHistoryStorage:
         phase: GamePhase,
         lesson_themes: tuple[LessonTheme, ...] = (),
         error_motif: ErrorMotif = ErrorMotif.UNKNOWN,
+        opening: DetectedOpening = UNCLASSIFIED_OPENING,
         attempted_at: datetime | None = None,
     ) -> TrainingAttempt:
         """Create a timestamped attempt object ready to be stored."""
@@ -190,6 +195,7 @@ class TrainingHistoryStorage:
             phase=phase,
             lesson_themes=lesson_themes,
             error_motif=error_motif,
+            opening=opening,
         )
 
     def _read_all(self) -> list[TrainingAttempt]:

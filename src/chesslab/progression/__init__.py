@@ -2,6 +2,7 @@
 
 from chesslab.progression.progress_tracker import (
     ProgressionErrorMotifStat,
+    ProgressionOpeningStat,
     ProgressionPhaseStat,
     ProgressionSnapshot,
     ProgressionThemeStat,
@@ -18,6 +19,7 @@ from chesslab.progression.weakness_progress import (
 
 __all__ = [
     "ProgressionErrorMotifStat",
+    "ProgressionOpeningStat",
     "ProgressionPhaseStat",
     "ProgressionSnapshot",
     "ProgressionThemeStat",

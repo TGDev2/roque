@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 
+from chesslab.openings import (
+    OpeningGrouping,
+    build_opening_filter_key,
+    describe_opening_group,
+    opening_matches_filter,
+)
 from chesslab.persistence.review_history import ReviewHistoryStorage, ReviewSummary
 from chesslab.persistence.training_history import TrainingAttempt, TrainingHistoryStorage
 from chesslab.progression.weakness_progress import (
@@ -65,6 +72,17 @@ class ProgressionPhaseStat:
 
 
 @dataclass(frozen=True)
+class ProgressionOpeningStat:
+    """Average centipawn loss grouped by opening."""
+
+    key: str
+    label: str
+    grouping: OpeningGrouping
+    game_count: int
+    avg_cp_loss: float
+
+
+@dataclass(frozen=True)
 class ProgressionSnapshot:
     """Aggregated view over the N most recent analysed games."""
 
@@ -76,6 +94,10 @@ class ProgressionSnapshot:
     cp_loss_trend: tuple[ProgressionTrendPoint, ...]
     avg_cp_loss_delta: float
     sample_avg_cp_loss: float
+    opening_stats: tuple[ProgressionOpeningStat, ...]
+    opening_grouping: OpeningGrouping
+    selected_opening_key: str | None
+    is_filtered_view: bool
     top_themes: tuple[ProgressionThemeStat, ...]
     top_error_motifs: tuple[ProgressionErrorMotifStat, ...]
     error_phases: tuple[ProgressionPhaseStat, ...]
@@ -113,7 +135,13 @@ class ProgressTracker:
         self._training_history = training_history or TrainingHistoryStorage()
         self._minimum_games = minimum_games
 
-    def build_snapshot(self, limit: int = 20) -> ProgressionSnapshot:
+    def build_snapshot(
+        self,
+        limit: int = 20,
+        *,
+        opening_grouping: OpeningGrouping = OpeningGrouping.ECO_CODE,
+        opening_filter_key: str | None = None,
+    ) -> ProgressionSnapshot:
         """Aggregate the most recent review summaries."""
         summaries = self._review_history.list_recent_reviews(limit=limit)
         attempts = self._training_history.list_recent_attempts(limit=None)
@@ -122,6 +150,8 @@ class ProgressTracker:
             sample_size=limit,
             minimum_games=self._minimum_games,
             training_attempts=attempts,
+            opening_grouping=opening_grouping,
+            opening_filter_key=opening_filter_key,
         )
 
 
@@ -131,17 +161,29 @@ def build_progression_snapshot(
     sample_size: int,
     minimum_games: int = 3,
     training_attempts: list[TrainingAttempt] | None = None,
+    opening_grouping: OpeningGrouping = OpeningGrouping.ECO_CODE,
+    opening_filter_key: str | None = None,
 ) -> ProgressionSnapshot:
     """Aggregate already-persisted review summaries."""
     if sample_size <= 0:
         raise ValueError("sample_size must be positive")
+
+    opening_stats = _build_opening_stats(
+        summaries,
+        grouping=opening_grouping,
+    )
+    filtered_summaries = [
+        summary
+        for summary in summaries
+        if opening_matches_filter(summary.opening, opening_filter_key)
+    ]
 
     classification_counts = {cls: 0 for cls in _TRACKED_CLASSIFICATIONS}
     theme_counts = {theme: 0 for theme in LessonTheme}
     error_motif_counts = {motif: 0 for motif in _TRACKED_ERROR_MOTIFS}
     error_phase_counts = {phase: 0 for phase in GamePhase}
 
-    for summary in summaries:
+    for summary in filtered_summaries:
         for cls in _TRACKED_CLASSIFICATIONS:
             classification_counts[cls] += summary.classification_counts.get(cls, 0)
         for theme in LessonTheme:
@@ -161,7 +203,7 @@ def build_progression_snapshot(
         for cls in _TRACKED_CLASSIFICATIONS
     }
 
-    chronological = list(reversed(summaries))
+    chronological = list(reversed(filtered_summaries))
     cp_loss_trend = tuple(
         ProgressionTrendPoint(
             reviewed_at=summary.reviewed_at,
@@ -222,7 +264,7 @@ def build_progression_snapshot(
     )
 
     weakness_stats = build_weakness_progress_stats(
-        summaries,
+        filtered_summaries,
         training_attempts=training_attempts,
     )
     training_themes = build_theme_progress_stats(weakness_stats)[:3]
@@ -250,13 +292,17 @@ def build_progression_snapshot(
 
     return ProgressionSnapshot(
         sample_size=sample_size,
-        analysed_games=len(summaries),
+        analysed_games=len(filtered_summaries),
         minimum_games=minimum_games,
         classification_counts=classification_counts,
         classification_percentages=classification_percentages,
         cp_loss_trend=cp_loss_trend,
         avg_cp_loss_delta=avg_cp_loss_delta,
         sample_avg_cp_loss=sample_avg_cp_loss,
+        opening_stats=opening_stats,
+        opening_grouping=opening_grouping,
+        selected_opening_key=opening_filter_key,
+        is_filtered_view=opening_filter_key is not None,
         top_themes=top_themes,
         top_error_motifs=top_error_motifs,
         error_phases=error_phases,
@@ -269,3 +315,43 @@ def build_progression_snapshot(
         urgent_weaknesses=urgent_weaknesses,
         training_themes=training_themes,
     )
+
+
+def _build_opening_stats(
+    summaries: list[ReviewSummary],
+    *,
+    grouping: OpeningGrouping,
+) -> tuple[ProgressionOpeningStat, ...]:
+    by_key: dict[str, list[ReviewSummary]] = defaultdict(list)
+    label_by_key: dict[str, str] = {}
+
+    for summary in summaries:
+        key = build_opening_filter_key(summary.opening, grouping)
+        by_key[key].append(summary)
+        label_by_key.setdefault(
+            key,
+            describe_opening_group(summary.opening, grouping),
+        )
+
+    stats = [
+        ProgressionOpeningStat(
+            key=key,
+            label=label_by_key[key],
+            grouping=grouping,
+            game_count=len(items),
+            avg_cp_loss=(
+                sum(item.avg_cp_loss for item in items) / len(items)
+                if items
+                else 0.0
+            ),
+        )
+        for key, items in by_key.items()
+    ]
+    return tuple(sorted(
+        stats,
+        key=lambda item: (
+            -item.avg_cp_loss,
+            -item.game_count,
+            item.label,
+        ),
+    ))

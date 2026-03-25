@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import chess
 
 from chesslab.analysis import AnalysisResult, Evaluation, VariationInfo
+from chesslab.openings import DetectedOpening
 from chesslab.persistence.review_history import ReviewSummary, TrainingPositionSummary
 from chesslab.persistence.training_history import TrainingAttempt, TrainingAttemptOutcome
 from chesslab.progression.weakness_progress import WeaknessMasteryState
@@ -53,6 +54,7 @@ def _summary(
     positions: tuple[TrainingPositionSummary, ...],
     error_phase_counts: dict[GamePhase, int] | None = None,
     lesson_theme_counts: dict[LessonTheme, int] | None = None,
+    opening: DetectedOpening | None = None,
 ) -> ReviewSummary:
     return ReviewSummary(
         game_id=game_id,
@@ -74,6 +76,7 @@ def _summary(
             theme: (lesson_theme_counts or {}).get(theme, 0)
             for theme in LessonTheme
         },
+        opening=opening or DetectedOpening(eco="B90", name="Sicilian Defense: Najdorf Variation"),
         training_positions=positions,
     )
 
@@ -186,6 +189,7 @@ class TestWeaknessTrainingSelection:
         assert session[0].focus_theme is LessonTheme.TURNING_POINT
         assert session[0].focus_phase is GamePhase.MIDDLEGAME
         assert "Turning point" in session[0].focus_reason
+        assert session[0].opening.eco == "B90"
 
     def test_build_session_deprioritises_mastered_weaknesses(self) -> None:
         starting_fen = chess.Board().fen()
@@ -272,6 +276,60 @@ class TestWeaknessTrainingSelection:
         assert session[0].attempt_count == 4
         assert "repeating" in session[0].mastery_summary.lower()
         assert session[1].mastery_state is WeaknessMasteryState.MASTERED
+
+    def test_build_session_filters_positions_by_opening(self) -> None:
+        starting_fen = chess.Board().fen()
+        service = WeaknessTrainingService()
+
+        session = service.build_session(
+            [
+                _summary(
+                    game_id="najdorf",
+                    reviewed_at="2026-03-24T11:00:00+00:00",
+                    positions=(
+                        _training_position(
+                            fen=starting_fen,
+                            played_uci="e2e4",
+                            best_move_uci="d2d4",
+                            best_move_san="d4",
+                            classification=MoveClassification.MISTAKE,
+                            phase=GamePhase.OPENING,
+                            cp_loss=180,
+                        ),
+                    ),
+                    opening=DetectedOpening(
+                        eco="B90",
+                        name="Sicilian Defense: Najdorf Variation",
+                    ),
+                ),
+                _summary(
+                    game_id="ruy",
+                    reviewed_at="2026-03-24T10:00:00+00:00",
+                    positions=(
+                        _training_position(
+                            fen=starting_fen,
+                            played_uci="g1f3",
+                            best_move_uci="e2e4",
+                            best_move_san="e4",
+                            classification=MoveClassification.BLUNDER,
+                            phase=GamePhase.OPENING,
+                            cp_loss=240,
+                        ),
+                    ),
+                    opening=DetectedOpening(
+                        eco="C60",
+                        name="Ruy Lopez",
+                    ),
+                ),
+            ],
+            sample_size=2,
+            session_size=5,
+            opening_filter_key="eco:B90",
+        )
+
+        assert len(session) == 1
+        assert session[0].game_id == "najdorf"
+        assert session[0].opening.eco == "B90"
 
 
 @dataclass

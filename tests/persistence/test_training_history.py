@@ -8,6 +8,7 @@ from pathlib import Path
 
 import chess
 
+from chesslab.openings import DetectedOpening, UNCLASSIFIED_OPENING
 from chesslab.persistence.training_history import (
     TrainingAttempt,
     TrainingAttemptOutcome,
@@ -42,6 +43,10 @@ def _attempt(
         phase=GamePhase.MIDDLEGAME,
         lesson_themes=(LessonTheme.TURNING_POINT,),
         error_motif=ErrorMotif.MISSED_TACTIC,
+        opening=DetectedOpening(
+            eco="B90",
+            name="Sicilian Defense: Najdorf Variation",
+        ),
     )
 
 
@@ -61,6 +66,7 @@ class TestTrainingHistoryStorage:
         assert saved[0].phase is GamePhase.MIDDLEGAME
         assert saved[0].lesson_themes == (LessonTheme.TURNING_POINT,)
         assert saved[0].submitted_move_uci == "g1f3"
+        assert saved[0].opening.eco == "B90"
 
     def test_reads_schema_v1_payload(self, tmp_path: Path) -> None:
         history_file = tmp_path / "training.json"
@@ -100,6 +106,7 @@ class TestTrainingHistoryStorage:
         assert saved[0].outcome is TrainingAttemptOutcome.PARTIAL
         assert saved[0].phase is GamePhase.OPENING
         assert saved[0].error_motif is ErrorMotif.MISSED_TACTIC
+        assert saved[0].opening == UNCLASSIFIED_OPENING
 
     def test_build_attempt_timestamps_automatically(self, tmp_path: Path) -> None:
         storage = TrainingHistoryStorage(history_file=tmp_path / "training.json")

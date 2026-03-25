@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from chesslab.openings import (
+    DetectedOpening,
+    OpeningGrouping,
+    UNCLASSIFIED_OPENING,
+    build_opening_filter_key,
+)
 from chesslab.persistence.review_history import ReviewSummary, TrainingPositionSummary
 from chesslab.persistence.training_history import TrainingAttempt, TrainingAttemptOutcome
 from chesslab.progression.progress_tracker import build_progression_snapshot
@@ -26,6 +32,7 @@ def _summary(
     lesson_theme_counts: dict[LessonTheme, int] | None = None,
     error_motif_counts: dict[ErrorMotif, int] | None = None,
     training_positions: tuple[TrainingPositionSummary, ...] = (),
+    opening: DetectedOpening = UNCLASSIFIED_OPENING,
 ) -> ReviewSummary:
     cls_counts = {cls: 0 for cls in (
         MoveClassification.EXCELLENT,
@@ -58,6 +65,7 @@ def _summary(
         error_phase_counts=phase_counts,
         lesson_theme_counts=theme_counts,
         error_motif_counts=motif_counts,
+        opening=opening,
         training_positions=training_positions,
     )
 
@@ -191,6 +199,11 @@ class TestBuildProgressionSnapshot:
         assert snapshot.training_attempt_count == 0
         assert snapshot.urgent_weaknesses == ()
         assert snapshot.training_themes == ()
+        assert snapshot.opening_stats[0].key == "unclassified"
+        assert snapshot.opening_stats[0].game_count == 3
+        assert snapshot.opening_grouping is OpeningGrouping.ECO_CODE
+        assert snapshot.selected_opening_key is None
+        assert snapshot.is_filtered_view is False
 
     def test_reports_when_more_games_are_needed(self) -> None:
         snapshot = build_progression_snapshot(
@@ -212,6 +225,8 @@ class TestBuildProgressionSnapshot:
 
         assert snapshot.has_enough_games is False
         assert snapshot.games_remaining == 1
+        assert snapshot.is_filtered_view is False
+        assert snapshot.opening_stats[0].key == "unclassified"
 
     def test_aggregates_training_mastery_and_repeating_weaknesses(self) -> None:
         mastered = _training_position(
@@ -300,3 +315,102 @@ class TestBuildProgressionSnapshot:
         assert snapshot.urgent_weaknesses[0].trend is WeaknessTrend.REPEATING
         assert snapshot.training_themes[0].theme is LessonTheme.TURNING_POINT
         assert snapshot.training_themes[0].trend is WeaknessTrend.REPEATING
+
+    def test_builds_opening_ranking_and_filters_other_metrics(self) -> None:
+        najdorf = DetectedOpening(
+            eco="B90",
+            name="Sicilian Defense: Najdorf Variation",
+        )
+        ruy_lopez = DetectedOpening(
+            eco="C60",
+            name="Ruy Lopez",
+        )
+
+        summaries = [
+            _summary(
+                game_id="g3",
+                reviewed_at="2026-03-22T12:00:00+00:00",
+                avg_cp_loss=55.0,
+                classification_counts={MoveClassification.BLUNDER: 1},
+                error_phase_counts={GamePhase.MIDDLEGAME: 1},
+                opening=najdorf,
+            ),
+            _summary(
+                game_id="g2",
+                reviewed_at="2026-03-21T12:00:00+00:00",
+                avg_cp_loss=35.0,
+                classification_counts={MoveClassification.MISTAKE: 1},
+                error_phase_counts={GamePhase.OPENING: 1},
+                opening=najdorf,
+            ),
+            _summary(
+                game_id="g1",
+                reviewed_at="2026-03-20T12:00:00+00:00",
+                avg_cp_loss=12.0,
+                classification_counts={MoveClassification.GOOD: 2},
+                opening=ruy_lopez,
+            ),
+        ]
+
+        snapshot = build_progression_snapshot(
+            summaries,
+            sample_size=20,
+            minimum_games=3,
+            opening_grouping=OpeningGrouping.ECO_CODE,
+            opening_filter_key=build_opening_filter_key(
+                najdorf,
+                OpeningGrouping.ECO_CODE,
+            ),
+        )
+
+        assert snapshot.is_filtered_view is True
+        assert snapshot.selected_opening_key == "eco:B90"
+        assert snapshot.analysed_games == 2
+        assert snapshot.has_enough_games is False
+        assert snapshot.classification_counts[MoveClassification.BLUNDER] == 1
+        assert snapshot.classification_counts[MoveClassification.MISTAKE] == 1
+        assert snapshot.classification_counts[MoveClassification.GOOD] == 0
+        assert snapshot.opening_stats[0].key == "eco:B90"
+        assert snapshot.opening_stats[0].avg_cp_loss == 45.0
+        assert snapshot.opening_stats[0].game_count == 2
+        assert snapshot.opening_stats[1].key == "eco:C60"
+
+    def test_aggregates_opening_families(self) -> None:
+        snapshot = build_progression_snapshot(
+            [
+                _summary(
+                    game_id="g3",
+                    reviewed_at="2026-03-22T12:00:00+00:00",
+                    avg_cp_loss=50.0,
+                    opening=DetectedOpening(
+                        eco="B90",
+                        name="Sicilian Defense: Najdorf Variation",
+                    ),
+                ),
+                _summary(
+                    game_id="g2",
+                    reviewed_at="2026-03-21T12:00:00+00:00",
+                    avg_cp_loss=30.0,
+                    opening=DetectedOpening(
+                        eco="B20",
+                        name="Sicilian Defense",
+                    ),
+                ),
+                _summary(
+                    game_id="g1",
+                    reviewed_at="2026-03-20T12:00:00+00:00",
+                    avg_cp_loss=10.0,
+                    opening=UNCLASSIFIED_OPENING,
+                ),
+            ],
+            sample_size=20,
+            minimum_games=1,
+            opening_grouping=OpeningGrouping.ECO_FAMILY,
+        )
+
+        assert snapshot.opening_grouping is OpeningGrouping.ECO_FAMILY
+        assert snapshot.opening_stats[0].key == "family:B"
+        assert snapshot.opening_stats[0].label == "B00-B99"
+        assert snapshot.opening_stats[0].avg_cp_loss == 40.0
+        assert snapshot.opening_stats[0].game_count == 2
+        assert snapshot.opening_stats[1].key == "unclassified"

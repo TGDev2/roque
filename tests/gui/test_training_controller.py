@@ -76,6 +76,7 @@ class TestTrainingController:
             sample_size=5,
             focus_review=None,
             training_attempts=["attempt"],
+            opening_filter_key=None,
         )
 
     def test_training_feedback_updates_panel_and_status(self) -> None:
@@ -101,6 +102,7 @@ class TestTrainingController:
         attempt = host.services.training_history.record_attempt.call_args.args[0]
         assert attempt.outcome is TrainingAttemptOutcome.SUCCESS
         assert attempt.weakness_id == controller._session[0].position.weakness_id
+        assert attempt.opening == controller._session[0].opening
         host.set_status.assert_called_once_with("Training — good move")
 
     def test_exit_training_returns_to_requested_mode(self) -> None:

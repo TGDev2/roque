@@ -10,10 +10,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import chess
+
+from chesslab.openings import (
+    DetectedOpening,
+    UNCLASSIFIED_OPENING,
+    detect_opening_from_uci_moves,
+)
 from chesslab.weaknesses import build_weakness_id
 from chesslab.review.game_reviewer import (
     ErrorMotif,
@@ -24,12 +31,12 @@ from chesslab.review.game_reviewer import (
     ReviewLesson,
 )
 
-from chesslab.persistence.game_storage import PersistenceError
+from chesslab.persistence.game_storage import GameStorage, PersistenceError
 
 _REVIEWS_DIR = Path.home() / ".chesslab" / "reviews"
 _REVIEW_HISTORY_FILE = _REVIEWS_DIR / "history.json"
-_SCHEMA_VERSION = 2
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
+_SCHEMA_VERSION = 3
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 _TRACKED_CLASSIFICATIONS: tuple[MoveClassification, ...] = (
     MoveClassification.EXCELLENT,
     MoveClassification.GOOD,
@@ -138,6 +145,7 @@ class ReviewSummary:
     error_phase_counts: dict[GamePhase, int]
     lesson_theme_counts: dict[LessonTheme, int]
     error_motif_counts: dict[ErrorMotif, int] = field(default_factory=dict)
+    opening: DetectedOpening = UNCLASSIFIED_OPENING
     source_path: str | None = None
     training_positions: tuple[TrainingPositionSummary, ...] = ()
 
@@ -164,6 +172,7 @@ class ReviewSummary:
                 motif.value: self.error_motif_counts.get(motif, 0)
                 for motif in _TRACKED_ERROR_MOTIFS
             },
+            "opening": self.opening.to_dict(),
             "source_path": self.source_path,
             "training_positions": [
                 position.to_dict() for position in self.training_positions
@@ -194,6 +203,7 @@ class ReviewSummary:
                 payload.get("error_motif_counts"),
                 _TRACKED_ERROR_MOTIFS,
             ),
+            opening=DetectedOpening.from_dict(payload.get("opening")),
             source_path=_maybe_str(payload.get("source_path")),
             training_positions=tuple(
                 TrainingPositionSummary.from_dict(item)
@@ -242,6 +252,7 @@ def build_review_summary(
         error_phase_counts=error_phase_counts,
         lesson_theme_counts=lesson_theme_counts,
         error_motif_counts=error_motif_counts,
+        opening=_detect_review_opening(review),
         source_path=normalized_source,
         training_positions=_build_training_positions(review),
     )
@@ -318,7 +329,21 @@ class ReviewHistoryStorage:
                 f"Invalid review history payload: {self._history_file}",
             )
 
-        summaries = [ReviewSummary.from_dict(item) for item in raw_reviews]
+        summaries: list[ReviewSummary] = []
+        needs_rewrite = schema_version < _SCHEMA_VERSION
+        for item in raw_reviews:
+            if not isinstance(item, dict):
+                raise PersistenceError(
+                    f"Invalid review history payload: {self._history_file}",
+                )
+            summary = ReviewSummary.from_dict(item)
+            if "opening" not in item:
+                summary = _backfill_review_opening(summary)
+                needs_rewrite = True
+            summaries.append(summary)
+
+        if needs_rewrite:
+            self._write_all(summaries)
         return sorted(summaries, key=lambda item: item.reviewed_at, reverse=True)
 
     def _write_all(self, summaries: list[ReviewSummary]) -> None:
@@ -342,6 +367,33 @@ def _build_game_id(review: GameReview, *, source_path: Path | None) -> str:
     source_key = str(source_path.resolve()) if source_path is not None else ""
     payload = f"{source_key}\n{start_fen}\n{move_string}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _detect_review_opening(review: GameReview) -> DetectedOpening:
+    if not review.moves:
+        return UNCLASSIFIED_OPENING
+    return detect_opening_from_uci_moves(
+        (move.uci for move in review.moves),
+        start_fen=review.moves[0].fen_before,
+    )
+
+
+def _backfill_review_opening(summary: ReviewSummary) -> ReviewSummary:
+    opening = UNCLASSIFIED_OPENING
+    if summary.source_path:
+        source_path = Path(summary.source_path)
+        if source_path.is_file():
+            try:
+                record = GameStorage.load_game(source_path)
+            except Exception:
+                record = None
+            if record is not None:
+                start_fen = record.headers.get("FEN", chess.STARTING_FEN)
+                opening = detect_opening_from_uci_moves(
+                    (move.uci() for move in record.board.move_stack),
+                    start_fen=start_fen,
+                )
+    return replace(summary, opening=opening)
 
 
 def _build_training_positions(

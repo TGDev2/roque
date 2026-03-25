@@ -11,6 +11,11 @@ from typing import Callable
 import chess
 
 from chesslab.analysis import AnalysisConfig, AnalysisResult, Evaluation, PositionAnalyser
+from chesslab.openings import (
+    DetectedOpening,
+    UNCLASSIFIED_OPENING,
+    opening_matches_filter,
+)
 from chesslab.persistence.review_history import ReviewSummary, TrainingPositionSummary
 from chesslab.persistence.training_history import TrainingAttempt, TrainingAttemptOutcome
 from chesslab.progression import build_progression_snapshot
@@ -82,6 +87,7 @@ class TrainingExercise:
     mastery_state: WeaknessMasteryState = WeaknessMasteryState.UNTRAINED
     weakness_trend: WeaknessTrend = WeaknessTrend.STABLE
     mastery_summary: str = "Not trained yet."
+    opening: DetectedOpening = UNCLASSIFIED_OPENING
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,7 @@ class WeaknessTrainingService:
         focus_review: GameReview | None = None,
         session_size: int = 5,
         training_attempts: list[TrainingAttempt] | None = None,
+        opening_filter_key: str | None = None,
     ) -> tuple[TrainingExercise, ...]:
         """Select the most relevant training exercises from persisted reviews."""
         if sample_size <= 0:
@@ -127,7 +134,11 @@ class WeaknessTrainingService:
         if session_size <= 0:
             raise ValueError("session_size must be positive")
 
-        relevant_summaries = summaries[:sample_size]
+        relevant_summaries = [
+            summary
+            for summary in summaries[:sample_size]
+            if opening_matches_filter(summary.opening, opening_filter_key)
+        ]
         if not relevant_summaries:
             return ()
 
@@ -209,6 +220,7 @@ class WeaknessTrainingService:
                         if weakness_stat is not None
                         else "Not trained yet."
                     ),
+                    opening=summary.opening,
                 ))
 
         ordered = sorted(
@@ -381,6 +393,7 @@ def build_training_attempt(
         phase=exercise.position.phase,
         lesson_themes=exercise.position.lesson_themes,
         error_motif=exercise.position.error_motif,
+        opening=exercise.opening,
     )
 
 

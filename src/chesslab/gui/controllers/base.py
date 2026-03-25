@@ -79,6 +79,7 @@ class TrainingModeRequest:
     sample_size: int
     focus_review: GameReview | None
     return_mode: AppMode
+    opening_filter_key: str | None = None
 
 
 @dataclass(frozen=True)

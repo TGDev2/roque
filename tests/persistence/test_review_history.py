@@ -8,6 +8,7 @@ from pathlib import Path
 
 import chess
 
+from chesslab.openings import UNCLASSIFIED_OPENING
 from chesslab.analysis import Evaluation
 from chesslab.persistence.review_history import ReviewHistoryStorage
 from chesslab.review.game_reviewer import (
@@ -146,6 +147,8 @@ class TestReviewHistoryStorage:
         assert saved[0].lesson_theme_counts[LessonTheme.TURNING_POINT] == 1
         assert saved[0].lesson_theme_counts[LessonTheme.PHASE_PATTERN] == 1
         assert saved[0].error_motif_counts[ErrorMotif.MATERIAL_LOSS] == 1
+        assert saved[0].opening.eco == "C20"
+        assert saved[0].opening.name == "King's Pawn Game"
         assert len(saved[0].training_positions) == 2
         assert saved[0].training_positions[0].best_move_uci == "d7d5"
         assert saved[0].training_positions[0].classification is MoveClassification.BLUNDER
@@ -228,4 +231,70 @@ class TestReviewHistoryStorage:
 
         assert len(saved) == 1
         assert saved[0].error_motif_counts[ErrorMotif.UNKNOWN] == 0
+        assert saved[0].opening == UNCLASSIFIED_OPENING
         assert saved[0].training_positions[0].error_motif is ErrorMotif.UNKNOWN
+
+    def test_backfills_legacy_opening_when_source_pgn_is_available(self, tmp_path: Path) -> None:
+        history_file = tmp_path / "reviews.json"
+        pgn_path = tmp_path / "game-1.pgn"
+        pgn_path.write_text(
+            '[Event "Imported"]\n'
+            '[Site "?"]\n'
+            '[Date "2026.03.20"]\n'
+            '[Round "-"]\n'
+            '[White "Alice"]\n'
+            '[Black "Bob"]\n'
+            '[Result "*"]\n'
+            '\n'
+            '1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 *\n',
+        )
+        payload = {
+            "schema_version": 2,
+            "reviews": [
+                {
+                    "game_id": "legacy",
+                    "reviewed_at": "2026-03-20T00:00:00+00:00",
+                    "move_count": 10,
+                    "avg_cp_loss": 45.0,
+                    "classification_counts": {
+                        "excellent": 0,
+                        "good": 1,
+                        "inaccuracy": 0,
+                        "mistake": 0,
+                        "blunder": 0,
+                    },
+                    "error_phase_counts": {
+                        "opening": 0,
+                        "middlegame": 0,
+                        "endgame": 0,
+                    },
+                    "lesson_theme_counts": {
+                        "phase_pattern": 0,
+                        "turning_point": 0,
+                        "advantage_management": 0,
+                    },
+                    "error_motif_counts": {
+                        "tactique_ratee": 0,
+                        "perte_de_materiel": 0,
+                        "structure_de_pions": 0,
+                        "activite_des_pieces": 0,
+                        "securite_du_roi": 0,
+                        "erreur_de_finale": 0,
+                        "motif_inconnu": 0,
+                    },
+                    "source_path": str(pgn_path),
+                    "training_positions": [],
+                },
+            ],
+        }
+        history_file.write_text(json.dumps(payload))
+
+        storage = ReviewHistoryStorage(history_file=history_file)
+        saved = storage.list_recent_reviews(limit=None)
+
+        assert saved[0].opening.eco == "B90"
+        assert saved[0].opening.name == "Sicilian Defense: Najdorf Variation"
+
+        rewritten = json.loads(history_file.read_text())
+        assert rewritten["schema_version"] == 3
+        assert rewritten["reviews"][0]["opening"]["eco"] == "B90"

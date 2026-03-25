@@ -15,7 +15,9 @@ import chess
 from chesslab.analysis import Evaluation, VariationInfo
 from chesslab.gui import theme
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
+from chesslab.openings import describe_opening_filter_key
 from chesslab.progression import (
+    ProgressionOpeningStat,
     ProgressionSnapshot,
     ProgressionTrendPoint,
     WeaknessMasteryState,
@@ -1282,6 +1284,7 @@ class TrainingPanel(tk.Frame):
         self._source_label.config(
             text=(
                 f"From your review history on {reviewed_date}. "
+                f"Opening: {exercise.opening.display_name}. "
                 f"{exercise.mastery_summary}"
             ),
         )
@@ -1413,7 +1416,7 @@ class ProgressionPanel(tk.Frame):
             text=f"{snapshot.analysed_games} games / window {snapshot.sample_size}",
         )
 
-        if not snapshot.has_enough_games:
+        if not snapshot.has_enough_games and not snapshot.is_filtered_view:
             self._render_empty_state(snapshot)
             if snapshot.tracked_weaknesses:
                 self._divider()
@@ -1424,9 +1427,15 @@ class ProgressionPanel(tk.Frame):
                 self._render_training_themes(snapshot)
             return
 
+        if snapshot.is_filtered_view:
+            self._render_filtered_sample_notice(snapshot)
+            self._divider()
+
         self._render_classifications(snapshot)
         self._divider()
         self._render_cp_loss_trend(snapshot)
+        self._divider()
+        self._render_openings(snapshot)
         self._divider()
         self._render_themes(snapshot)
         self._divider()
@@ -1471,6 +1480,39 @@ class ProgressionPanel(tk.Frame):
             wraplength=360,
             anchor="w",
         ).pack(fill="x")
+
+    def _render_filtered_sample_notice(self, snapshot: ProgressionSnapshot) -> None:
+        filter_label = describe_opening_filter_key(snapshot.selected_opening_key)
+        if snapshot.analysed_games == 0:
+            message = (
+                f"No reviewed games matched {filter_label} in the current window. "
+                "The ranking below still reflects all openings in the window."
+            )
+            colour = _EVAL_NEGATIVE
+        elif snapshot.analysed_games < snapshot.minimum_games:
+            message = (
+                f"Filtered view for {filter_label}: only {snapshot.analysed_games} "
+                "game(s) match this opening in the current window, so treat these "
+                "trends as a small sample."
+            )
+            colour = _FG
+        else:
+            message = (
+                f"Filtered view for {filter_label}. The opening ranking below still "
+                "covers every opening in the current window."
+            )
+            colour = _FG
+
+        tk.Label(
+            self._content,
+            text=message,
+            bg=_CARD_BG,
+            fg=colour,
+            font=("sans-serif", 9, "bold"),
+            justify="left",
+            wraplength=360,
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
 
     def _render_classifications(self, snapshot: ProgressionSnapshot) -> None:
         self._section_title("Move classifications")
@@ -1525,6 +1567,48 @@ class ProgressionPanel(tk.Frame):
             return
 
         self._draw_sparkline(snapshot.cp_loss_trend)
+
+    def _render_openings(self, snapshot: ProgressionSnapshot) -> None:
+        self._section_title("Openings by average cp loss")
+        if not snapshot.opening_stats:
+            tk.Label(
+                self._content,
+                text="No opening classification available yet in this sample.",
+                bg=_CARD_BG,
+                fg=_FG_DIM,
+                font=("sans-serif", 9),
+                anchor="w",
+                justify="left",
+                wraplength=360,
+            ).pack(fill="x")
+            return
+
+        for stat in snapshot.opening_stats[:8]:
+            self._render_opening_row(stat)
+
+    def _render_opening_row(self, stat: ProgressionOpeningStat) -> None:
+        row = tk.Frame(self._content, bg=_CARD_BG)
+        row.pack(fill="x", pady=1)
+
+        tk.Label(
+            row,
+            text=stat.label,
+            bg=_CARD_BG,
+            fg=_FG,
+            font=("sans-serif", 9),
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        ).pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            row,
+            text=f"{stat.avg_cp_loss:.0f}cp  ({stat.game_count})",
+            bg=_CARD_BG,
+            fg=_FG_DIM,
+            font=("monospace", 8),
+            anchor="e",
+        ).pack(side="right")
 
     def _render_themes(self, snapshot: ProgressionSnapshot) -> None:
         self._section_title("Recurring lesson themes")

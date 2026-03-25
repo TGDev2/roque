@@ -154,6 +154,7 @@ class TrainingController(ControllerBase):
                 sample_size=request.sample_size,
                 focus_review=request.focus_review,
                 training_attempts=attempts,
+                opening_filter_key=request.opening_filter_key,
             )
         except Exception as exc:
             logger.exception("Failed to build training session.")
@@ -164,16 +165,30 @@ class TrainingController(ControllerBase):
         if session:
             return session
 
-        self._show_training_unavailable(self._build_training_unavailable_message(summaries))
+        self._show_training_unavailable(
+            self._build_training_unavailable_message(
+                summaries,
+                opening_filter_key=request.opening_filter_key,
+            ),
+        )
         self._host.switch_mode(request.return_mode)
         return ()
 
     @staticmethod
-    def _build_training_unavailable_message(summaries: list[object]) -> str:
+    def _build_training_unavailable_message(
+        summaries: list[object],
+        *,
+        opening_filter_key: str | None = None,
+    ) -> str:
         if not summaries:
             return (
                 "No training positions are available yet. Run a few post-game reviews "
                 "to generate reusable mistakes, blunders, and lesson positions."
+            )
+        if opening_filter_key is not None:
+            return (
+                "No reusable training positions were found for the selected opening "
+                "in your recent review history."
             )
         return (
             "No reusable training positions were found in your recent review history. "
