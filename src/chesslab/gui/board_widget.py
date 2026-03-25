@@ -17,6 +17,8 @@ from typing import Callable, ClassVar
 
 import chess
 
+from chesslab.gui import theme
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -38,33 +40,6 @@ UNICODE_PIECES: dict[str, str] = {
     "p": "\u265f",
 }
 
-# Board colours — warm, modern palette.
-_LIGHT_SQUARE = "#ecd8b8"
-_DARK_SQUARE = "#ae8a68"
-_SELECTED_COLOUR = "#f7ec5d"
-_SELECTED_DARK = "#d6cc3a"
-_LEGAL_DOT_COLOUR = "#4a4a4a"
-_LEGAL_CAPTURE_COLOUR = "#e05555"
-_LAST_MOVE_LIGHT = "#cdd26a"
-_LAST_MOVE_DARK = "#a9a238"
-_HIGHLIGHT_ARROW = "#3b82f6"
-_CHECK_COLOUR = "#e74c3c"
-_MOVE_HINT_STIPPLE = "gray50"
-
-_PROMOTION_BG = "#1a1a2e"
-_PROMOTION_FG = "#e8e8e8"
-_PROMOTION_BTN_BG = "#2d2d44"
-_PROMOTION_BTN_HOVER = "#3d3d5c"
-
-# Piece colours.
-_WHITE_PIECE_FILL = "#ffffff"
-_WHITE_PIECE_OUTLINE = "#222222"
-_BLACK_PIECE_FILL = "#1a1a1a"
-_BLACK_PIECE_OUTLINE = "#1a1a1a"
-
-_COORD_LIGHT_FG = "#a07850"
-_COORD_DARK_FG = "#d4bc98"
-
 MoveCallback = Callable[[str, str], None]
 
 
@@ -74,7 +49,7 @@ class BoardMoveHint:
 
     from_square: str
     to_square: str
-    colour: str = _HIGHLIGHT_ARROW
+    colour: str = theme.HIGHLIGHT_ARROW
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +200,7 @@ class BoardWidget(tk.Canvas):
         self._selected_square: str | None = None
         self._last_move: tuple[str, str] | None = None
         self._highlighted_squares: tuple[str, ...] = ()
-        self._highlight_colour = _HIGHLIGHT_ARROW
+        self._highlight_colour = theme.HIGHLIGHT_ARROW
         self._move_hint: BoardMoveHint | None = None
 
         self.bind("<Button-1>", self._on_click)
@@ -290,7 +265,7 @@ class BoardWidget(tk.Canvas):
     def clear_highlights(self) -> None:
         """Redraw the board without extra highlights."""
         self._highlighted_squares = ()
-        self._highlight_colour = _HIGHLIGHT_ARROW
+        self._highlight_colour = theme.HIGHLIGHT_ARROW
         self._move_hint = None
         self._draw()
 
@@ -335,13 +310,13 @@ class BoardWidget(tk.Canvas):
 
                 # Base square colour.
                 if sq_name == self._selected_square:
-                    colour = _SELECTED_COLOUR if is_light else _SELECTED_DARK
+                    colour = theme.SELECTED_LIGHT if is_light else theme.SELECTED_DARK
                 elif sq_name in last_move_sqs:
-                    colour = _LAST_MOVE_LIGHT if is_light else _LAST_MOVE_DARK
+                    colour = theme.LAST_MOVE_LIGHT if is_light else theme.LAST_MOVE_DARK
                 elif is_light:
-                    colour = _LIGHT_SQUARE
+                    colour = theme.LIGHT_SQUARE
                 else:
-                    colour = _DARK_SQUARE
+                    colour = theme.DARK_SQUARE
 
                 self.create_rectangle(
                     x, y, x + sz, y + sz,
@@ -354,7 +329,7 @@ class BoardWidget(tk.Canvas):
                     self.create_rectangle(
                         x + margin, y + margin,
                         x + sz - margin, y + sz - margin,
-                        fill=_CHECK_COLOUR, outline="", stipple="gray50",
+                        fill=theme.CHECK_COLOUR, outline="", stipple="gray50",
                     )
 
         # Draw legal move indicators (dots and capture rings).
@@ -366,7 +341,7 @@ class BoardWidget(tk.Canvas):
                 x + sz - margin, y + sz - margin,
                 fill=self._highlight_colour,
                 outline="",
-                stipple=_MOVE_HINT_STIPPLE,
+                stipple=theme.MOVE_HINT_STIPPLE,
             )
 
         # Draw legal move indicators (dots and capture rings).
@@ -378,14 +353,14 @@ class BoardWidget(tk.Canvas):
                 r = int(sz * 0.46)
                 self.create_oval(
                     cx - r, cy - r, cx + r, cy + r,
-                    outline=_LEGAL_CAPTURE_COLOUR, width=3,
+                    outline=theme.LEGAL_CAPTURE_COLOUR, width=3,
                 )
             else:
                 # Small dot for empty legal destination.
                 r = int(sz * 0.14)
                 self.create_oval(
                     cx - r, cy - r, cx + r, cy + r,
-                    fill=_LEGAL_DOT_COLOUR, outline="",
+                    fill=theme.LEGAL_DOT_COLOUR, outline="",
                     stipple="gray50",
                 )
 
@@ -410,13 +385,13 @@ class BoardWidget(tk.Canvas):
                             cx + dx, cy + dy,
                             text=UNICODE_PIECES[fen_char],
                             font=("sans-serif", font_size, "bold"),
-                            fill=_WHITE_PIECE_OUTLINE,
+                            fill=theme.WHITE_PIECE_OUTLINE,
                         )
                     self.create_text(
                         cx, cy,
                         text=UNICODE_PIECES[fen_char],
                         font=("sans-serif", font_size, "bold"),
-                        fill=_WHITE_PIECE_FILL,
+                        fill=theme.WHITE_PIECE_FILL,
                     )
                 else:
                     # Black piece: solid dark.
@@ -424,7 +399,7 @@ class BoardWidget(tk.Canvas):
                         cx, cy,
                         text=UNICODE_PIECES[fen_char],
                         font=("sans-serif", font_size, "bold"),
-                        fill=_BLACK_PIECE_FILL,
+                        fill=theme.BLACK_PIECE_FILL,
                     )
 
         # Draw best-move arrow highlight.
@@ -457,7 +432,7 @@ class BoardWidget(tk.Canvas):
                 bx, by,
                 text=file_label,
                 font=font,
-                fill=_COORD_DARK_FG if is_light else _COORD_LIGHT_FG,
+                fill=theme.COORD_DARK_FG if is_light else theme.COORD_LIGHT_FG,
                 anchor="se",
             )
             # Rank labels (left column).
@@ -470,7 +445,7 @@ class BoardWidget(tk.Canvas):
                 rx, ry,
                 text=rank_label,
                 font=font,
-                fill=_COORD_DARK_FG if is_light else _COORD_LIGHT_FG,
+                fill=theme.COORD_DARK_FG if is_light else theme.COORD_LIGHT_FG,
                 anchor="nw",
             )
 
@@ -561,25 +536,25 @@ class BoardWidget(tk.Canvas):
             dialog.title("Promote")
             dialog.transient(parent)
             dialog.resizable(False, False)
-            dialog.configure(bg=_PROMOTION_BG)
+            dialog.configure(bg=theme.PROMOTION_BG)
             dialog.overrideredirect(True)
 
-            inner = tk.Frame(dialog, bg=_PROMOTION_BG, bd=2, relief="solid",
-                             highlightbackground="#444466",
+            inner = tk.Frame(dialog, bg=theme.PROMOTION_BG, bd=2, relief="solid",
+                             highlightbackground=theme.PROMOTION_BORDER,
                              highlightthickness=1)
             inner.pack(fill="both", expand=True)
 
             tk.Label(
                 inner,
                 text="Promote to",
-                bg=_PROMOTION_BG,
-                fg=_PROMOTION_FG,
+                bg=theme.PROMOTION_BG,
+                fg=theme.PROMOTION_FG,
                 font=("sans-serif", 10, "bold"),
                 padx=10,
                 pady=6,
             ).pack()
 
-            btn_frame = tk.Frame(inner, bg=_PROMOTION_BG)
+            btn_frame = tk.Frame(inner, bg=theme.PROMOTION_BG)
             btn_frame.pack(padx=6, pady=(0, 8))
 
             pieces = [
@@ -605,9 +580,9 @@ class BoardWidget(tk.Canvas):
                     command=make_handler(piece_type),
                     width=2,
                     height=1,
-                    bg=_PROMOTION_BTN_BG,
-                    fg=_PROMOTION_FG,
-                    activebackground=_PROMOTION_BTN_HOVER,
+                    bg=theme.PROMOTION_BTN_BG,
+                    fg=theme.PROMOTION_FG,
+                    activebackground=theme.PROMOTION_BTN_HOVER,
                     activeforeground="#ffffff",
                     relief="flat",
                     bd=0,

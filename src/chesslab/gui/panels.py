@@ -13,6 +13,7 @@ from typing import Callable
 import chess
 
 from chesslab.analysis import Evaluation, VariationInfo
+from chesslab.gui import theme
 from chesslab.overlay.overlay_display import eval_to_bar_fraction, format_pv
 from chesslab.progression import (
     ProgressionSnapshot,
@@ -37,40 +38,28 @@ from chesslab.training import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Colour palette
-# ---------------------------------------------------------------------------
+_BG = theme.BG
+_CARD_BG = theme.CARD_BG
+_CARD_BORDER = theme.CARD_BORDER
+_FG = theme.FG
+_FG_DIM = theme.FG_DIM
+_FG_MUTED = theme.FG_MUTED
+_ACCENT = theme.ACCENT
+_ACCENT_DIM = theme.ACCENT_DARK
+_BAR_WHITE = theme.BAR_WHITE
+_BAR_BLACK = theme.BAR_BLACK
+_BAR_BORDER = theme.BAR_BORDER
+_LOADING = theme.LOADING
+_EVAL_POSITIVE = theme.EVAL_POSITIVE
+_EVAL_NEGATIVE = theme.EVAL_NEGATIVE
+_EVAL_NEUTRAL = theme.EVAL_NEUTRAL
+_MOVE_NUM_FG = theme.MOVE_NUM_FG
+_WHITE_MOVE_FG = theme.WHITE_MOVE_FG
+_BLACK_MOVE_FG = theme.BLACK_MOVE_FG
+_SCROLLBAR_BG = theme.SCROLLBAR_BG
+_SCROLLBAR_FG = theme.SCROLLBAR_FG
 
-_BG = "#16161e"
-_CARD_BG = "#1e1e2e"
-_CARD_BORDER = "#2a2a3c"
-_FG = "#e0e0e8"
-_FG_DIM = "#7a7a8c"
-_FG_MUTED = "#555566"
-_ACCENT = "#64b5f6"
-_ACCENT_DIM = "#3d7ab8"
-_BAR_WHITE = "#f0f0f0"
-_BAR_BLACK = "#1a1a24"
-_BAR_BORDER = "#3a3a4c"
-_LOADING = "#ffb74d"
-_EVAL_POSITIVE = "#66bb6a"
-_EVAL_NEGATIVE = "#ef5350"
-_EVAL_NEUTRAL = "#b0b0b8"
-_MOVE_NUM_FG = "#5a5a6c"
-_WHITE_MOVE_FG = "#e0e0e8"
-_BLACK_MOVE_FG = "#b0b0c0"
-_SCROLLBAR_BG = "#2a2a3c"
-_SCROLLBAR_FG = "#4a4a5c"
-
-# Classification colours.
-_CLS_COLORS: dict[MoveClassification, str] = {
-    MoveClassification.EXCELLENT: "#66bb6a",
-    MoveClassification.GOOD: "#a5d6a7",
-    MoveClassification.INACCURACY: "#ffee58",
-    MoveClassification.MISTAKE: "#ffb74d",
-    MoveClassification.BLUNDER: "#ef5350",
-    MoveClassification.FORCED: "#7a7a8c",
-}
+_CLS_COLORS: dict[MoveClassification, str] = theme.CLASSIFICATION_COLOURS
 _CLS_LABELS: dict[MoveClassification, str] = {
     MoveClassification.EXCELLENT: "Excellent",
     MoveClassification.GOOD: "Good",
@@ -84,10 +73,10 @@ _ERROR_CLASSIFICATIONS = frozenset({
     MoveClassification.MISTAKE,
     MoveClassification.BLUNDER,
 })
-_HIGHLIGHT_BG = "#2a3a4c"
-_LESSON_BG = "#23283a"
-_TREND_LINE = "#80cbc4"
-_TREND_POINT = "#26a69a"
+_HIGHLIGHT_BG = theme.HIGHLIGHT_BG
+_LESSON_BG = theme.LESSON_BG
+_TREND_LINE = theme.TREND_LINE
+_TREND_POINT = theme.TREND_POINT
 
 _THEME_LABELS: dict[LessonTheme, str] = {
     LessonTheme.PHASE_PATTERN: "Phase pattern",
@@ -108,11 +97,9 @@ _ERROR_MOTIF_LABELS: dict[ErrorMotif, str] = {
     ErrorMotif.ENDGAME_ERROR: "Erreur de finale",
     ErrorMotif.UNKNOWN: "Motif inconnu",
 }
-_TRAINING_FEEDBACK_COLORS: dict[TrainingFeedbackLabel, str] = {
-    TrainingFeedbackLabel.GOOD: _EVAL_POSITIVE,
-    TrainingFeedbackLabel.BETTER_AVAILABLE: _LOADING,
-    TrainingFeedbackLabel.SIGNIFICANT_ERROR: _EVAL_NEGATIVE,
-}
+_TRAINING_FEEDBACK_COLORS: dict[TrainingFeedbackLabel, str] = (
+    theme.TRAINING_FEEDBACK_COLOURS
+)
 _TRAINING_FEEDBACK_LABELS: dict[TrainingFeedbackLabel, str] = {
     TrainingFeedbackLabel.GOOD: "Good move",
     TrainingFeedbackLabel.BETTER_AVAILABLE: "There was better",
@@ -130,11 +117,7 @@ _WEAKNESS_TREND_LABELS: dict[WeaknessTrend, str] = {
     WeaknessTrend.STABLE: "Stable",
     WeaknessTrend.REPEATING: "Repeating",
 }
-_WEAKNESS_TREND_COLORS: dict[WeaknessTrend, str] = {
-    WeaknessTrend.IMPROVING: _EVAL_POSITIVE,
-    WeaknessTrend.STABLE: _FG,
-    WeaknessTrend.REPEATING: _EVAL_NEGATIVE,
-}
+_WEAKNESS_TREND_COLORS: dict[WeaknessTrend, str] = theme.WEAKNESS_TREND_COLOURS
 
 
 def _card_frame(parent: tk.Widget, **kwargs: object) -> tk.Frame:
@@ -926,7 +909,7 @@ class GameSummaryPanel(tk.Frame):
             text=f"  W {review.white_avg_cp_loss:.0f}cp  B {review.black_avg_cp_loss:.0f}cp",
             bg=_CARD_BG, fg=_FG,
             font=("sans-serif", 9), anchor="w",
-        ).pack(side="left")
+            ).pack(side="left")
 
         # Phase summaries.
         for ps in review.phase_summaries:
@@ -938,6 +921,11 @@ class GameSummaryPanel(tk.Frame):
                 bg=_CARD_BG, fg=_FG_DIM, font=("sans-serif", 8),
                 anchor="w",
             ).pack(side="left")
+
+    def clear(self) -> None:
+        """Remove all rendered summary widgets."""
+        for widget in self._content.winfo_children():
+            widget.destroy()
 
     def _render_lessons(
         self,
